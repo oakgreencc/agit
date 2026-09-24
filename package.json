@@ -1,0 +1,23 @@
+{
+  "name": "agit",
+  "version": "0.1.0",
+  "description": "Let an agent work a GitHub project without the local git CLI's write path: Verified commits created by a GitHub App, the repo's git hooks run at the right moments, CODEOWNERS as the manifest of what needs a human, and a scoped maintainer mode for when one says yes.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "agit": "./bin/agit.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "skills/",
+    ".claude-plugin/",
+    "docs/"
+  ],
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
