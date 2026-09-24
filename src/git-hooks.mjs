@@ -37,7 +37,7 @@
 import { spawnSync } from 'node:child_process'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { PublishError } from './publish/publish.mjs'
+import { PublishError } from './errors.mjs'
 
 export const ZERO_SHA = '0'.repeat(40)
 

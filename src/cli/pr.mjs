@@ -25,8 +25,8 @@ import { flag, has, positionals } from '../context.mjs'
 import { allows, grantAdvice } from '../maintainer.mjs'
 import { baseHealth, mergeVerdict, rescueFacts } from '../pr-policy.mjs'
 import { createPolicy } from '../protected.mjs'
-import { PublishError } from '../publish/publish.mjs'
-import { contextFrom } from './common.mjs'
+import { PublishError } from '../errors.mjs'
+import { COMMON_VALUE_FLAGS, contextFrom } from './common.mjs'
 
 const USAGE = `usage: agit pr merge <n> [--method merge|squash|rebase] [--auto] [--repo <owner/repo>]
        agit pr update <n> [--repo <owner/repo>]`
@@ -83,18 +83,12 @@ async function paginate(client, path) {
   return all
 }
 
-/**
- * @param {string[]} argv
- * @param {{ cwd?: string }} [opts]
- */
-export async function run(argv, { cwd = process.cwd() } = {}) {
-  const [sub, numberArg] = positionals(argv, ['--method', '--repo', '-C'])
+/** @param {string[]} argv */
+export async function run(argv) {
+  const [sub, numberArg] = positionals(argv, [...COMMON_VALUE_FLAGS, '--method'])
   const number = Number(numberArg)
-  if (!['merge', 'update'].includes(sub) || !Number.isInteger(number) || number <= 0) {
-    console.error(USAGE)
-    process.exit(1)
-  }
-  const ctx = contextFrom(argv.includes('-C') ? argv : [...argv, '-C', cwd], { needRoot: false })
+  if (!['merge', 'update'].includes(sub) || !Number.isInteger(number) || number <= 0) throw new PublishError(USAGE)
+  const ctx = contextFrom(argv, { needRoot: false })
   const { owner, repo, full } = ctx.repo()
   const client = await ctx.client()
   const pr = await client.api(`/repos/${owner}/${repo}/pulls/${number}`)

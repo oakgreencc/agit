@@ -20,7 +20,7 @@ import {
   validateRequest,
   writeGrant,
 } from '../maintainer.mjs'
-import { PublishError } from '../publish/publish.mjs'
+import { PublishError } from '../errors.mjs'
 import { COMMON_VALUE_FLAGS, contextFrom } from './common.mjs'
 
 const USAGE = `usage:

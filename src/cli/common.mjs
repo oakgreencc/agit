@@ -7,7 +7,7 @@
 import { resolve } from 'node:path'
 import { flag, resolveContext } from '../context.mjs'
 import { versionRefusal } from '../gates/version.mjs'
-import { PublishError } from '../publish/publish.mjs'
+import { PublishError } from '../errors.mjs'
 
 /** Flags every verb accepts, and which take a value. */
 export const COMMON_VALUE_FLAGS = ['-C', '--repo']

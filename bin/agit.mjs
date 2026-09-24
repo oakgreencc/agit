@@ -21,7 +21,7 @@
  * `agit help` for the verbs.
  */
 
-import { PublishError } from '../src/publish/publish.mjs'
+import { PublishError } from '../src/errors.mjs'
 import { VERSION } from '../src/gates/version.mjs'
 import { explain } from '../src/cli/explain.mjs'
 

@@ -34,6 +34,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PublishError } from '../errors.mjs'
 import {
   batchByBytes,
   blobShas,
@@ -60,8 +61,7 @@ export const BLOB_PACE_MS = 1000
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const noop = () => {}
 
-/** A refusal the CLI prints as-is, distinct from a crash. */
-export class PublishError extends Error {}
+export { PublishError }
 
 const lines = (s) =>
   s
