@@ -11,10 +11,11 @@ import {
   findPayloadRefusals,
   isNeverPublished,
   noPrNote,
-  payloadRefusalsInWorktree,
+  payloadRefusalsInTree,
   payloadMessage,
   sweepMessage,
 } from '../src/gates/scope.mjs'
+import { worktreeTree } from '../src/publish/publish.mjs'
 
 const KiB = 1024
 
@@ -250,12 +251,23 @@ const GIT_ENV = {
   GIT_COMMITTER_NAME: 't',
   GIT_COMMITTER_EMAIL: 't@t',
 }
-const gitIn = (dir) => (args) =>
+const gitIn = (dir) => (args, opts = {}) =>
   execFileSync('git', ['-C', dir, ...args], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ...GIT_ENV },
+    env: { ...process.env, ...GIT_ENV, ...(opts.env ?? {}) },
   })
+
+/**
+ * The payload gate the way a publish runs it: build the tree from the
+ * worktree (as `worktreeTree` does), then measure what that tree changes.
+ */
+function payloadOf({ git, head, paths = null, allow }) {
+  const { tree } = worktreeTree({ git, base: head, paths })
+  if (!tree) return []
+  const changed = git(['diff-tree', '-r', '--no-renames', '--name-only', '-z', head, tree]).split('\0').filter(Boolean)
+  return payloadRefusalsInTree({ git, base: head, tree, paths: changed, allow })
+}
 
 /** A repo with one commit holding a large tracked file, as develop does. */
 function scratchRepo() {
@@ -270,7 +282,7 @@ function scratchRepo() {
   return { dir, git, head: git(['rev-parse', 'HEAD']).trim() }
 }
 
-test('payloadRefusalsInWorktree over real git: a 600 KiB blob and foo.log are refused, --allow-large lifts each', (t) => {
+test('payloadRefusalsInTree over real git: a 600 KiB blob and foo.log are refused, --allow-large lifts each', (t) => {
   const { dir, git, head } = scratchRepo()
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   writeFileSync(join(dir, 'big.bin'), Buffer.alloc(600 * KiB, 1))
@@ -279,7 +291,7 @@ test('payloadRefusalsInWorktree over real git: a 600 KiB blob and foo.log are re
   // The lockfile grows by 40 KiB: a dependency bump, not a dump.
   writeFileSync(join(dir, 'pnpm-lock.yaml'), 'x'.repeat(856 * KiB))
 
-  const all = payloadRefusalsInWorktree({ git, worktree: dir, head, paths: null })
+  const all = payloadOf({ git, head })
   assert.deepEqual(
     all.map(({ path, reason }) => ({ path, reason })),
     [
@@ -287,42 +299,17 @@ test('payloadRefusalsInWorktree over real git: a 600 KiB blob and foo.log are re
       { path: 'foo.log', reason: 'log' },
     ],
   )
-  // --paths scopes the gate to what is being published.
-  assert.deepEqual(
-    payloadRefusalsInWorktree({ git, worktree: dir, head, paths: ['src', 'pnpm-lock.yaml'] }),
-    [],
-  )
+  // --paths scopes the tree, and so the gate, to what is being published.
+  assert.deepEqual(payloadOf({ git, head, paths: ['src', 'pnpm-lock.yaml'] }), [])
   // --allow-large names the path.
   assert.deepEqual(
-    payloadRefusalsInWorktree({ git, worktree: dir, head, paths: null, allow: ['big.bin'] }).map(
-      (r) => r.path,
-    ),
+    payloadOf({ git, head, allow: ['big.bin'] }).map((r) => r.path),
     ['foo.log'],
   )
-  assert.deepEqual(
-    payloadRefusalsInWorktree({
-      git,
-      worktree: dir,
-      head,
-      paths: null,
-      allow: ['big.bin', 'foo.log'],
-    }),
-    [],
-  )
+  assert.deepEqual(payloadOf({ git, head, allow: ['big.bin', 'foo.log'] }), [])
 })
 
-test('payloadRefusalsInWorktree refuses a worktree argument that is not the repository root', (t) => {
-  const { dir, head } = scratchRepo()
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
-  writeFileSync(join(dir, 'src/a.ts'), 'export const a = 2\n')
-  const sub = join(dir, 'src')
-  assert.throws(
-    () => payloadRefusalsInWorktree({ git: gitIn(sub), worktree: sub, head, paths: null }),
-    /worktree must be the repository root; .* is src\/ inside it/,
-  )
-})
-
-test('payloadRefusalsInWorktree: deleting a tracked large file, or a tracked log, is not a refusal', (t) => {
+test('payloadRefusalsInTree: deleting a tracked large file, or a tracked log, is not a refusal', (t) => {
   const { dir, git } = scratchRepo()
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   writeFileSync(join(dir, 'old.log'), 'x'.repeat(2 * KiB))
@@ -331,7 +318,17 @@ test('payloadRefusalsInWorktree: deleting a tracked large file, or a tracked log
   const head = git(['rev-parse', 'HEAD']).trim()
   unlinkSync(join(dir, 'old.log'))
   unlinkSync(join(dir, 'pnpm-lock.yaml'))
-  assert.deepEqual(payloadRefusalsInWorktree({ git, worktree: dir, head, paths: null }), [])
+  assert.deepEqual(payloadOf({ git, head }), [])
+})
+
+test('payloadRefusalsInTree measures the TREE, not the disk: what is judged is what ships', (t) => {
+  const { dir, git, head } = scratchRepo()
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  writeFileSync(join(dir, 'src/a.ts'), 'export const a = 2\n')
+  const { tree } = worktreeTree({ git, base: head, paths: null })
+  // The disk moves on after the tree was built; the tree is what lands.
+  writeFileSync(join(dir, 'src/a.ts'), 'x'.repeat(600 * KiB))
+  assert.deepEqual(payloadRefusalsInTree({ git, base: head, tree: /** @type {string} */ (tree), paths: ['src/a.ts'] }), [])
 })
 
 const AGIT = new URL('../bin/agit.mjs', import.meta.url).pathname

@@ -6,7 +6,7 @@ Every refusal happens before anything reaches GitHub, so retrying after the fix 
 The publish did not say what it carries. The refusal lists every dirty path. Pass `--paths` with the ones you mean; `--all` only when every listed path belongs in the commit.
 
 ## `N paths are protected`
-CODEOWNERS (or `.agit.json` `protected.extra`, or self-protection) says a human approves these. Either drop them from `--paths` and publish the rest, or ask the human for `--scope protected`. With a grant, the PR still needs the code owner's review on GitHub — say that in the PR body.
+CODEOWNERS (or `.agit.json` `protected.extra`, or self-protection) says a human approves these. Either drop them from `--paths` and publish the rest, or ask the human for `--scope protected`. With a grant, the PR still needs the code owner's review on GitHub — say that in the PR body. The gates judge the tree as built, so a path the pre-commit hook staged is listed too; if you did not name it, the hook wrote it — report that rather than working around it.
 
 ## `cannot be written by the App at all`
 `protected.impossible` — by default `.github/workflows/**`. No grant exists. Leave the path out, and put the exact patch in your report for the human to apply.
@@ -39,8 +39,9 @@ The merge was made on a stale worktree. `agit advance <branch>`, redo the merge,
 - **base not in mergeableBases** — this project does not let agents merge into that branch; hand the PR to a human.
 - **touches protected paths** — the human merges it (CODEOWNERS requires their review anyway).
 - **base is red** — merging onto a known break buries it. If this PR is the fix: `agit pr update <n>`, let its required check finish green, then merge; a PR that contains the broken head and passes goes through.
+- **the policy on the base does not parse** — the base's `.agit.json` is broken, so the merge could only be judged by the defaults. Report it; fixing it is a protected change.
 
-A `merge` grant lifts all three locally; GitHub's rulesets still apply.
+A `merge` grant lifts these locally; GitHub's rulesets still apply. The policy is read from the base branch alone — never from your worktree.
 
 ## GitHub errors
 - **403 not accessible by integration** — the App lacks that permission on purpose (workflows, administration, secrets). Hand it to the human.

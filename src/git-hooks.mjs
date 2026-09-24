@@ -121,9 +121,31 @@ export function hookRunner({ git, root, config, skip = false, report = () => {},
       )
   }
 
-  return {
+  const runner = {
     dir,
     ran,
+
+    /**
+     * This runner wired to the publish primitive's moments (`PublishHooks` in
+     * publish.mjs) for a push of `branch` over `remoteSha`. A commit that
+     * already IS what lands is shown to pre-push as itself; otherwise pre-push
+     * sees a local twin with the same tree, parents and message.
+     *
+     * @param {{ branch: string, remoteSha: string | null }} input
+     * @returns {import('./publish/publish.mjs').PublishHooks}
+     */
+    forPublish({ branch, remoteSha }) {
+      return {
+        preCommit: (env) => runner.preCommit(env),
+        commitMessage: (message) => runner.commitMessage(message),
+        prePush: (commit) =>
+          runner.prePush({
+            branch,
+            localSha: commit.sha ?? previewCommit({ git, .../** @type {any} */ (commit) }),
+            remoteSha,
+          }),
+      }
+    },
 
     /** @param {Record<string, string>} env carries GIT_INDEX_FILE for the publish index */
     preCommit(env) {
@@ -173,6 +195,7 @@ export function hookRunner({ git, root, config, skip = false, report = () => {},
       })
     },
   }
+  return runner
 }
 
 /** git's default `cleanup=strip`: drop `#` comment lines and trailing blank lines. */
