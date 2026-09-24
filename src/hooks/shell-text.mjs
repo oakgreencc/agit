@@ -5,7 +5,9 @@
  * NOT a hook. Nothing dispatches to this file; it is the library
  * `guard-credentials.mjs` and `guard-protected.mjs` both import, and it lives
  * beside them because a helper that decides what a guard sees is part of the
- * guard.
+ * guard. Their way in is `executedCommands`: every command a line runs,
+ * nested `sh -c` included, each raw and masked — so both guards see the same
+ * set, to the same depth.
  *
  * ---------------------------------------------------------------------------
  * WHY IT EXISTS.
@@ -86,19 +88,20 @@ export function maskQuoted(cmd) {
 }
 
 /**
- * Contents of `sh -c '<payload>'` / `bash -c "<payload>"` / `zsh -c …`.
+ * Contents of `sh -c '<payload>'` / `bash -c "<payload>"` / `zsh -c …`, ONE
+ * level in. Those payloads ARE commands — otherwise `bash -c "gh issue list"`
+ * walks straight through a hook that only looks at the outer command. This is
+ * the one place quoted text is not treated as data.
  *
- * Those payloads ARE commands, so callers scan them recursively — otherwise
- * `bash -c "gh issue list"` walks straight through a hook that only looks at the
- * outer command. This is the one place quoted text is not treated as data.
- *
- * Returned RAW (quotes intact inside): a caller masks each one itself, exactly
- * as it masks the outer command.
+ * Returned RAW (quotes intact inside). Guards use `executedCommands`, which
+ * follows these to any depth and masks each one.
  */
 export function shellPayloads(cmd) {
   const payloads = []
-  const re = /\b(?:ba|z|k|da)?sh\s+(?:-[a-zA-Z]+\s+)*-c\s*(['"])([\s\S]*?)\1/g
-  for (const m of cmd.matchAll(re)) payloads.push(m[2])
+  // Single quotes: literal to the next `'`. Double quotes: `\"`, `\\`, `\$`
+  // and `\`` are escapes — the payload the shell runs has them undone.
+  const re = /\b(?:ba|z|k|da)?sh\s+(?:-[a-zA-Z]+\s+)*-c\s*(?:'([^']*)'|"((?:\\[\s\S]|[^"\\])*)")/g
+  for (const m of cmd.matchAll(re)) payloads.push(m[1] ?? m[2].replace(/\\(["\\$`])/g, '$1'))
 
   // A heredoc fed to a SHELL is executed, so `bash <<'EOF' … gh … EOF` must be
   // scanned. One fed to anything else (python3, cat, jq) is data — masked by
@@ -107,6 +110,40 @@ export function shellPayloads(cmd) {
     /(?:^|[;&|(\n])\s*(?:\w+=\S+\s+)*(?:ba|z|k|da)?sh\b[^\n<]*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1([\s\S]*?)^\t*\2$/gm
   for (const m of cmd.matchAll(hd)) payloads.push(m[3])
   return payloads
+}
+
+/** How deep `sh -c` nesting is followed. Deeper than any real command; a bound, not a feature. */
+const MAX_NESTING = 8
+
+/**
+ * Every command a command line EXECUTES: itself, and each `sh -c` payload or
+ * shell-fed heredoc inside it, followed to any depth — `bash -c "sh -c 'gh …'"`
+ * is three commands, and the innermost is the one that matters. Each comes as
+ * `{ raw, masked }`: the text as typed, and the same text with quoted spans
+ * and heredoc bodies blanked (length-preserving, see `maskQuoted`).
+ *
+ * The one entry point for a guard: scan every `masked` for shapes, read real
+ * tokens back from `raw`. A guard that scans only the outer command, or one
+ * level in, is the gap this closes.
+ *
+ * @param {string} command
+ * @returns {{ raw: string, masked: string }[]}
+ */
+export function executedCommands(command) {
+  const out = []
+  const seen = new Set()
+  let level = [command]
+  for (let depth = 0; level.length && depth <= MAX_NESTING; depth++) {
+    const next = []
+    for (const raw of level) {
+      if (seen.has(raw)) continue
+      seen.add(raw)
+      out.push({ raw, masked: maskQuoted(raw) })
+      next.push(...shellPayloads(raw))
+    }
+    level = next
+  }
+  return out
 }
 
 /**

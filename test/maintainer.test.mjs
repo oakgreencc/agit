@@ -22,7 +22,7 @@ test('readGrant: every state', () => {
   const d = tmp()
   const path = join(d, 'g.json')
   try {
-    assert.deepEqual(readGrant({ path, session: 's', now: NOW }), { state: 'none' })
+    assert.deepEqual(readGrant({ path, session: 's', now: NOW }), { state: 'none', session: 's' })
     writeFileSync(path, '{nope')
     assert.equal(readGrant({ path, session: 's', now: NOW }).state, 'invalid')
     writeFileSync(path, JSON.stringify({ reason: 'x y' }))

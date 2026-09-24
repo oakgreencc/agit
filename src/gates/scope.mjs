@@ -49,14 +49,11 @@
  * `--allow-large <path,path>` lifts both refusals, for exactly the paths it
  * names — an override that has to spell the path cannot be typed by reflex.
  *
- * Pure but for {@link payloadRefusalsInWorktree}: the rest take what git printed
+ * Pure but for {@link payloadRefusalsInTree}: the rest take what git printed
  * and what the caller measured, and return findings. The CLI prints.
  */
 
-import { lstatSync } from 'node:fs'
-import { join } from 'node:path'
 import { patternToRegExp } from '../codeowners.mjs'
-import { dirtyPaths } from '../publish/publish.mjs'
 
 /** The most one publish may add to a single path, in bytes. */
 export const ADDED_BYTES_CEILING = 512 * 1024
@@ -144,48 +141,30 @@ export function findPayloadRefusals({
 }
 
 /**
- * {@link findPayloadRefusals} over a real worktree: the in-scope changed paths,
- * their sizes on disk, and their sizes on `head` (which the caller has
- * fetched — the displacement gate does). Same `git` as the publish path.
+ * {@link findPayloadRefusals} over the tree a publish would land: `paths`
+ * (what the tree changes), their sizes IN `tree`, and their sizes on `base`.
  *
- * `lstat`, not `stat`: a symlink is published as its link target string, and
- * that is the size git stores.
- *
- * `worktree` must be the repository root, and that is asserted rather than
- * assumed: `git status` prints root-relative paths, so a `worktree` naming a
- * subdirectory would miss every file and read each as a deletion — the gate
- * failing open. The rest of the publish path makes the same assumption
- * (`update-index -- <path>` in `worktreeTree`), so this refuses what it would
- * have broken anyway, only earlier and by name.
+ * Measured on the built tree rather than on disk, so what is judged is what
+ * ships — including anything the pre-commit hook staged or rewrote — and the
+ * size is the one git stores (a symlink is its target string). A path absent
+ * from `tree` is a deletion.
  *
  * @param {object} input
  * @param {(args: string[]) => string} input.git
- * @param {string} input.worktree       the directory `git` runs in — the repo root
- * @param {string} input.head           the commit the publish builds on
- * @param {string[] | null} input.paths `--paths`, or null for `--all`
+ * @param {string} input.base           the commit the publish builds on
+ * @param {string} input.tree           the tree it would land
+ * @param {string[]} input.paths        the paths that tree changes
  * @param {string[]} [input.allow]
  * @param {number} [input.ceiling]
  * @param {string[]} [input.neverPublish]
  * @returns {PayloadRefusal[]}
  */
-export function payloadRefusalsInWorktree({ git, worktree, head, paths, allow, ceiling, neverPublish }) {
-  const changed = dirtyPaths(git, paths)
-  if (!changed.length) return []
-  const prefix = git(['rev-parse', '--show-prefix']).trim()
-  if (prefix) {
-    throw new Error(
-      `publish: the worktree must be the repository root; ${worktree} is ${prefix} inside it`,
-    )
-  }
-  const before = blobSizes(git(['ls-tree', '-r', '-l', '-z', head]))
-  const size = (p) => {
-    try {
-      return lstatSync(join(worktree, p)).size
-    } catch {
-      return null // gone from disk: a deletion
-    }
-  }
-  return findPayloadRefusals({ changed, size, before, allow, ceiling, neverPublish })
+export function payloadRefusalsInTree({ git, base, tree, paths, allow, ceiling, neverPublish }) {
+  if (!paths.length) return []
+  const before = blobSizes(git(['ls-tree', '-r', '-l', '-z', base]))
+  const after = blobSizes(git(['ls-tree', '-r', '-l', '-z', tree]))
+  const size = (p) => after.get(p) ?? null
+  return findPayloadRefusals({ changed: paths, size, before, allow, ceiling, neverPublish })
 }
 
 /** `1234` → `1.2 KiB`; bytes under 1 KiB stay whole. */

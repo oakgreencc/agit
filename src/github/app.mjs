@@ -81,18 +81,37 @@ export function appJwt({ appId, keyPem, now = Math.floor(Date.now() / 1000) }) {
 /** The response headers a refusal keeps — the ones the rate-limit rules read. */
 const KEPT_HEADERS = ['retry-after', 'x-ratelimit-remaining', 'x-ratelimit-reset']
 
+const urlFor = (path) => (path.startsWith('http') ? path : `https://api.github.com${path}`)
+
+/** The RFC 5988 `Link: <…>; rel="next"` target, or `null`. */
+const nextLink = (res) => /<([^>]+)>;\s*rel="next"/.exec(res.headers?.get?.('link') ?? '')?.[1] ?? null
+
 /**
- * Raw REST call. Returns `{ res, text, json }` so callers can read headers
- * (paging) and choose whether to parse. Not every endpoint returns JSON — job
- * logs are plain text behind a redirect, and blindly parsing them throws a
- * SyntaxError that looks nothing like "this endpoint isn't JSON".
+ * Is `err` GitHub answering 404? The one test for "absent", for every caller:
+ * `request` attaches `status`; the `<path>: 404` message is the fallback for
+ * an error that did not come through it.
+ */
+export const isNotFound = (err) => err?.status === 404 || /: 404 /.test(String(err?.message))
+
+/**
+ * @typedef {{ status: number, text: string, json: any, next: string | null }} Response
+ *   `json` is `null` for a body that is not JSON; `next` is the next page.
+ */
+
+/**
+ * Raw REST call. Returns `{ status, text, json, next }` so callers can page
+ * and choose whether to parse. Not every endpoint returns JSON — job logs are
+ * plain text behind a redirect, and blindly parsing them throws a SyntaxError
+ * that looks nothing like "this endpoint isn't JSON".
  *
  * A non-2xx answer is thrown as an Error whose message is `<path>: <status>
- * <body>` (callers match on `: 404 `), carrying `status` and the
+ * <body>`, carrying `status` (see {@link isNotFound}) and the
  * {@link KEPT_HEADERS} as `headers` so {@link rateLimitWait} can read them.
+ *
+ * @returns {Promise<Response>}
  */
 export async function request(path, opts = {}, fetchImpl = globalThis.fetch) {
-  const url = path.startsWith('http') ? path : `https://api.github.com${path}`
+  const url = urlFor(path)
   const res = await fetchImpl(url, {
     ...opts,
     headers: {
@@ -120,7 +139,21 @@ export async function request(path, opts = {}, fetchImpl = globalThis.fetch) {
   } catch {
     json = null // non-JSON body (e.g. logs) — `api` prints the text
   }
-  return { res, text, json }
+  return { status: res.status, text, json, next: nextLink(res) }
+}
+
+/**
+ * Requests as the App ITSELF — the App's JWT as bearer, not an installation
+ * token. The few calls that need it (find an installation, mint its token,
+ * read the App) go through here, never by assembling the header.
+ *
+ * @param {{ appId: string, keyPem: string }} creds
+ * @param {typeof globalThis.fetch} [fetch]
+ * @returns {(path: string, init?: RequestInit) => Promise<Response>}
+ */
+export function asApp({ appId, keyPem }, fetch = globalThis.fetch) {
+  return (path, init = {}) =>
+    request(path, { ...init, headers: { Authorization: `Bearer ${appJwt({ appId, keyPem })}`, ...(init.headers ?? {}) } }, fetch)
 }
 
 /** Raw installation token for the installation that covers `owner/repo`. */
@@ -130,16 +163,9 @@ export async function installationToken({ owner, repo, appId, keyPem, fetch = gl
 
 /** `{ token, expiresAt }` — the mint, with the expiry the cache needs. */
 async function mintToken({ owner, repo, appId, keyPem, fetch = globalThis.fetch }) {
-  const bearer = { Authorization: `Bearer ${appJwt({ appId, keyPem })}` }
-  const inst = (await request(`/repos/${owner}/${repo}/installation`, { headers: bearer }, fetch))
-    .json
-  const { token, expires_at } = (
-    await request(
-      `/app/installations/${inst.id}/access_tokens`,
-      { method: 'POST', headers: bearer },
-      fetch,
-    )
-  ).json
+  const app = asApp({ appId, keyPem }, fetch)
+  const inst = (await app(`/repos/${owner}/${repo}/installation`)).json
+  const { token, expires_at } = (await app(`/app/installations/${inst.id}/access_tokens`, { method: 'POST' })).json
   return { token, expiresAt: expires_at ?? null }
 }
 
@@ -230,12 +256,22 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const noop = () => {}
 
 /**
- * An authenticated client: `api(path, init)` returns parsed JSON, `raw` the
- * whole `{ res, text, json }`. Every request carries the token; a caller
- * never assembles an Authorization header itself.
+ * An authenticated client — the one port every GitHub call goes through:
  *
- * Built from a token rather than from credentials so the same client serves
- * any App.
+ *   api(path, init?)          parsed JSON
+ *   json(path, method, body)  a JSON write
+ *   raw(path, init?)          the whole {@link Response}: text, status, next page
+ *   getOrNull(path)           parsed JSON, or `null` when GitHub answers 404
+ *   paginate(path, init?)     every page of a list, concatenated — a bare array,
+ *                             or a wrapper (`{ total_count, jobs: […] }`) with its
+ *                             one array concatenated; a non-list is returned as is
+ *   download(path, init?)     the body as bytes (artifact zips, which text corrupts)
+ *   graphql(query, vars?)     `data`, or a throw on an `errors` array
+ *
+ * Every request carries the token; a caller never assembles an Authorization
+ * header itself. Built from a token rather than from credentials so the same
+ * client serves any App — and over any `fetch`, which is the seam the tests
+ * use: the real client, over a fake GitHub.
  *
  * A rate-limited refusal (403/429, see {@link rateLimitWait}) is waited out
  * and the request repeated, up to {@link RATE_LIMIT_RETRIES} times, and each
@@ -289,8 +325,44 @@ export function createClient({
     if (out?.errors?.length) throw new Error(`graphql: ${JSON.stringify(out.errors)}`)
     return out?.data ?? null
   }
-  return { api, raw, json, graphql, auth, fetch }
+  const getOrNull = async (path) => {
+    try {
+      return await api(path)
+    } catch (err) {
+      if (isNotFound(err)) return null
+      throw err
+    }
+  }
+  const paginate = async (path, init) => {
+    /** @type {any[] | null} */
+    let all = null
+    /** @type {any} */
+    let wrapper = null
+    /** @type {string | null} */
+    let next = path
+    while (next) {
+      const page = await raw(next, init)
+      const body = page.json
+      if (Array.isArray(body)) (all ??= []).push(...body)
+      else {
+        const key = body && typeof body === 'object' ? Object.keys(body).find((k) => Array.isArray(body[k])) : undefined
+        if (!key) return body // not a list at all
+        wrapper ??= { ...body, [key]: [] }
+        wrapper[key].push(...body[key])
+      }
+      next = page.next
+    }
+    return wrapper ?? all ?? []
+  }
+  const download = async (path, init = {}) => {
+    const res = await fetch(urlFor(path), withAuth(init))
+    if (!res.ok) throw Object.assign(new Error(`${path}: ${res.status} ${await res.text()}`), { status: res.status })
+    return Buffer.from(await res.arrayBuffer())
+  }
+  return { api, json, raw, getOrNull, paginate, download, graphql }
 }
+
+/** @typedef {ReturnType<typeof createClient>} Client */
 
 /**
  * The usual way in: credentials → installation token → client. `report` is

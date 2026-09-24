@@ -36,6 +36,8 @@
  * cannot be un-stuck is worse than the breakage it prevents.
  */
 
+import { judge } from './protected.mjs'
+
 /**
  * @typedef {{ number: number, base: string, headSha: string }} PrFacts
  * @typedef {{ text: string, liftable: boolean }} Refusal
@@ -51,12 +53,13 @@
  * @param {PrFacts} input.pr
  * @param {string[]} input.allowedBases
  * @param {import('./protected.mjs').Policy} input.policy   as of the base
+ * @param {string | null} [input.policyProblem]             the base's `.agit.json` did not parse
  * @param {string | null} input.requiredCheck
  * @param {boolean} input.granted                            an active `merge` grant
  * @param {Lookups} input.lookups
  * @returns {Promise<{ ok: boolean, refusals: Refusal[], lifted: Refusal[], notes: string[] }>}
  */
-export async function mergeVerdict({ pr, allowedBases, policy, requiredCheck, granted, lookups }) {
+export async function mergeVerdict({ pr, allowedBases, policy, policyProblem = null, requiredCheck, granted, lookups }) {
   /** @type {Refusal[]} */
   const found = []
   /** @type {string[]} */
@@ -83,10 +86,16 @@ export async function mergeVerdict({ pr, allowedBases, policy, requiredCheck, gr
       text: `cannot read the files ${label} changes (${/** @type {Error} */ (err).message}); a merge whose contents cannot be seen cannot be cleared.`,
     })
   }
+  if (policyProblem) {
+    found.push({
+      liftable: true,
+      text:
+        `the policy on \`${pr.base}\` does not parse (${policyProblem}), so ${label} was judged by the defaults — ` +
+        'a policy nobody wrote. Fix .agit.json on the base first.',
+    })
+  }
   if (files) {
-    const hits = policy.checkAll(files)
-    const impossible = hits.filter((h) => h.tier === 'impossible')
-    const guarded = hits.filter((h) => h.tier === 'protected')
+    const { impossible, protected: guarded } = judge({ paths: files, policies: [policy] })
     if (impossible.length)
       found.push({
         liftable: false,

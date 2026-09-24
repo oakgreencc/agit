@@ -1,7 +1,10 @@
 // @ts-check
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { violation, signingDisabled, sshRewriteActive, denial } from '../src/hooks/guard-credentials.mjs'
+import * as guard from '../src/hooks/guard-credentials.mjs'
+import { respond } from '../src/hooks/index.mjs'
+
+const { violation, signingDisabled, sshRewriteActive } = guard
 import { gitConfigEnv } from '../src/setup/settings.mjs'
 
 // A session that HAS the SSH→HTTPS rewrite. Cases carry their own env so the
@@ -167,8 +170,15 @@ test('the env block agit setup writes: signing off, rewrite on, fetch quiet, pus
   assert.equal(violation('git push origin main', SETUP_ENV)?.id, 'push')
 })
 
-test('a denial names the rule and points at agit', () => {
-  const out = denial(/** @type {any} */ (violation('gh pr list', {})))
+test('nested sh -c is followed to any depth; quoted text inside a payload is still data', () => {
+  assert.equal(violation(`bash -c "sh -c 'gh pr list'"`, {})?.id, 'gh')
+  assert.equal(violation(`sh -c "bash -c 'zsh -c \\"git push\\"'"`, {})?.id, 'push')
+  assert.equal(violation(`bash -c "echo 'gh pr list'"`, {}), null)
+})
+
+test('a denial names the rule and points at agit, through the hook host', async () => {
+  const line = await respond(guard, JSON.stringify({ tool_input: { command: 'gh pr list' } }), { env: {} })
+  const out = JSON.parse(String(line))
   assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
   assert.match(out.hookSpecificOutput.permissionDecisionReason, /^Blocked \(gh\)/)
   assert.match(out.hookSpecificOutput.permissionDecisionReason, /agit publish/)

@@ -18,12 +18,13 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { ownersOf, parseCodeowners } from '../codeowners.mjs'
 import { mergeableBases } from '../config.mjs'
-import { flag, has, resolveContext } from '../context.mjs'
+import { contextOptions } from '../cli/common.mjs'
+import { has, resolveContext } from '../context.mjs'
 import { findHook, hooksDir } from '../git-hooks.mjs'
-import { appJwt, readAppCredentials, request } from '../github/app.mjs'
+import { asApp, readAppCredentials } from '../github/app.mjs'
 import { describe } from '../maintainer.mjs'
 import { SELF_PROTECTED } from '../protected.mjs'
 import { WITHHELD_PERMISSIONS } from './manifest.mjs'
@@ -161,7 +162,8 @@ export async function run(argv, deps = {}) {
 
   let ctx
   try {
-    ctx = resolveContext({ cwd: deps.cwd ?? (flag(argv, '-C') ? resolve(/** @type {string} */ (flag(argv, '-C'))) : undefined), repo: flag(argv, '--repo'), env: deps.env })
+    ctx = resolveContext(contextOptions(argv, deps))
+    void ctx.config // a broken .agit.json is this finding, not a crash later
   } catch (err) {
     add(fail('.agit.json', /** @type {Error} */ (err).message))
     return finish(findings, argv)
@@ -193,8 +195,7 @@ export async function run(argv, deps = {}) {
     }
     if (creds) {
       try {
-        const headers = { Authorization: `Bearer ${appJwt(creds)}` }
-        const { json } = await request(`/repos/${owner}/${repo}/installation`, { headers })
+        const { json } = await asApp(creds)(`/repos/${owner}/${repo}/installation`)
         add(ok(`App installed on ${owner}/${repo}`))
         add(...permissionFindings(json?.permissions))
       } catch (err) {
@@ -211,7 +212,7 @@ export async function run(argv, deps = {}) {
       try {
         const client = await ctx.client()
         add(ok('installation token mints'))
-        base = base ?? (await ctx.baseBranch())
+        base = await ctx.baseBranch()
         try {
           const rules = await client.api(`/repos/${owner}/${repo}/rules/branches/${encodeURIComponent(base)}`)
           add(...rulesFindings(rules, base))
@@ -230,13 +231,7 @@ export async function run(argv, deps = {}) {
 
   // --- CODEOWNERS -----------------------------------------------------------
   const policy = ctx.localPolicy()
-  const coPath = policy.codeownersPath
-  add(
-    ...codeownersFindings(
-      { path: coPath, text: coPath ? readFileSync(join(ctx.root, coPath), 'utf8') : '' },
-      policy.unsupported,
-    ),
-  )
+  add(...codeownersFindings(policy.codeowners, policy.unsupported))
 
   // --- git hooks ------------------------------------------------------------
   try {

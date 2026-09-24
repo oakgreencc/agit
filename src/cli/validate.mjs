@@ -12,7 +12,7 @@
 import { spawnSync } from 'node:child_process'
 import { flag, has } from '../context.mjs'
 import { writeReceipt } from '../gates/validated-base.mjs'
-import { PublishError } from '../publish/publish.mjs'
+import { PublishError } from '../errors.mjs'
 import { contextFrom } from './common.mjs'
 
 export async function run(argv) {

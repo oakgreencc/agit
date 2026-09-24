@@ -22,8 +22,6 @@ async function clientForPath(argv, path = '') {
   return { ctx, client: await ctx.client() }
 }
 
-const nextLink = (res) => /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1] ?? null
-
 const API_USAGE =
   'usage: agit api <METHOD> <path> [--body <json>|--body-file <f>] [--paginate] [--raw] [--out <file>] [--repo <owner/repo>]\n\n' +
   '  agit api GET /repos/o/r/pulls/12\n' +
@@ -51,10 +49,7 @@ export async function runApi(argv) {
   // zips in particular, which stdout would corrupt.
   const out = flag(argv, '--out')
   if (out) {
-    const url = path.startsWith('http') ? path : `https://api.github.com${path}`
-    const res = await fetch(url, { ...init, headers: { ...client.auth, ...init.headers } })
-    if (!res.ok) throw new Error(`${path}: ${res.status} ${await res.text()}`)
-    writeFileSync(out, Buffer.from(await res.arrayBuffer()))
+    writeFileSync(out, await client.download(path, init))
     console.log(`wrote ${out}`)
     return 0
   }
@@ -73,28 +68,9 @@ export async function runApi(argv) {
     return 0
   }
 
-  // RFC 5988 `Link: rel="next"`, array pages concatenated. Some list endpoints
-  // wrap the array (`{ total_count, workflow_runs: [...] }`); those are
-  // concatenated on the one array key.
-  const all = []
-  /** @type {string | null} */
-  let next = path
-  let wrapper = null
-  while (next) {
-    const { res, json } = await client.raw(next, init)
-    if (Array.isArray(json)) all.push(...json)
-    else {
-      const key = json && Object.keys(json).find((k) => Array.isArray(json[k]))
-      if (!key) {
-        console.log(JSON.stringify(json, null, 2))
-        return 0
-      }
-      wrapper ??= { ...json, [key]: [] }
-      wrapper[key].push(...json[key])
-    }
-    next = nextLink(res)
-  }
-  console.log(JSON.stringify(wrapper ?? all, null, 2))
+  // Array pages concatenated; a wrapped list (`{ total_count, workflow_runs:
+  // [...] }`) concatenated on its one array key — see `client.paginate`.
+  console.log(JSON.stringify(await client.paginate(path, init), null, 2))
   return 0
 }
 
@@ -135,14 +111,7 @@ export async function runJobs(argv) {
   const base = `/repos/${owner}/${repo}/actions`
 
   const run = await client.api(`${base}/runs/${runId}`)
-  const jobs = []
-  /** @type {string | null} */
-  let next = `${base}/runs/${runId}/jobs?per_page=100`
-  while (next) {
-    const { res, json } = await client.raw(next)
-    jobs.push(...json.jobs)
-    next = nextLink(res)
-  }
+  const { jobs } = await client.paginate(`${base}/runs/${runId}/jobs?per_page=100`)
 
   /** @type {Record<number, string>} */
   const logs = {}
