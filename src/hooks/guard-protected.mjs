@@ -60,13 +60,12 @@
  * was ported from stripped one hard-coded worktree prefix, and the guard was
  * silently off for every session whose worktree lived anywhere else.
  */
-import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 
 import { contextForPath } from '../context.mjs'
 import { currentSession, grantAdvice } from '../maintainer.mjs'
 import { judge, normalise } from '../protected.mjs'
-import { maskQuoted, segments, shellPayloads, tokens } from './shell-text.mjs'
+import { executedCommands, segments, tokens } from './shell-text.mjs'
 
 /** Tools whose `file_path` (or `notebook_path`) input is a write. */
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit'])
@@ -74,8 +73,13 @@ const WRITE_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit'])
 /** Strip one layer of surrounding quotes from a shell token. */
 const unquote = (t) => t.replace(/^['"]|['"]$/g, '')
 
-/** Looks like a path rather than a flag or an operator. */
-const pathish = (t) => !!t && !t.startsWith('-') && /[/.]/.test(t) && !/^[|&;<>]+$/.test(t)
+/**
+ * Could be a path: not empty, not a flag, not an operator. A bare name —
+ * `CODEOWNERS`, `Makefile`, `Dockerfile` — IS a path; a shape filter that
+ * wanted a `/` or `.` let `rm CODEOWNERS` through unjudged. Whether it
+ * matters is the policy's question, not the tokenizer's.
+ */
+const pathish = (t) => !!t && !t.startsWith('-') && !/^[|&;<>]+$/.test(t)
 
 /** A token is a FLAG only if it starts with `-`. */
 const isFlag = (t) => t.startsWith('-')
@@ -98,16 +102,28 @@ const REMOVER = verb('rm|unlink|truncate')
  * returned. Shapes are matched on the MASKED command; the path is read back
  * from the RAW command at the same offset, so a quoted path is still a path.
  *
+ * Every command the line executes is scanned — nested `sh -c` payloads to
+ * any depth (`executedCommands`) — and each target is listed once.
+ *
  * @param {string} command
  * @returns {string[]}
  */
 export function writeTargets(command) {
+  return [...new Set(executedCommands(command).flatMap(targetsOf))]
+}
+
+/**
+ * The write targets of ONE command, nested payloads not included.
+ *
+ * @param {{ raw: string, masked: string }} one
+ * @returns {string[]}
+ */
+function targetsOf({ raw: command, masked }) {
   const out = []
   const add = (t) => {
     const p = unquote(t ?? '')
     if (pathish(p)) out.push(p)
   }
-  const masked = maskQuoted(command)
   const rawAt = (m, group) =>
     command.slice(m.index + m[0].length - m[group].length, m.index + m[0].length)
 
@@ -160,9 +176,6 @@ export function writeTargets(command) {
   for (const m of command.matchAll(/\b(?:writeFile|appendFile)(?:Sync)?\(\s*(['"])([^'"\n]+)\1/g))
     add(m[2])
 
-  // `sh -c '…'` runs its payload; scan it as the command it is.
-  for (const payload of shellPayloads(command)) out.push(...writeTargets(payload))
-
   return out
 }
 
@@ -174,16 +187,16 @@ const AGENT_MAINTAINER_OK = new Set(['status', 'revoke', 'help', '--help', '-h']
 
 /**
  * Does this command run `agit maintainer <something other than status/revoke>`?
- * Masked-quote aware, and `sh -c` payloads are scanned: `echo "agit maintainer
- * grant"` is text, `bash -c "agit maintainer grant x"` is a grant.
+ * Masked-quote aware, and nested `sh -c` payloads are scanned to any depth:
+ * `echo "agit maintainer grant"` is text, `bash -c "sh -c 'agit maintainer
+ * grant x'"` is a grant.
  *
  * @param {string} command
  */
 export function grantsItself(command) {
-  const check = (cmd) => {
-    const masked = maskQuoted(cmd)
+  return executedCommands(command).some(({ raw, masked }) => {
     for (const seg of segments(masked)) {
-      const toks = tokens(seg, cmd)
+      const toks = tokens(seg, raw)
       for (let i = 0; i < toks.length; i++) {
         if (!AGIT_WORD.test(toks[i].masked)) continue
         const rest = toks.slice(i + 1).map((t) => unquote(t.raw))
@@ -195,8 +208,7 @@ export function grantsItself(command) {
       }
     }
     return false
-  }
-  return check(command) || shellPayloads(command).some(check)
+  })
 }
 
 /** Inside a clone's `.git/agit/` — the grant file and its log. */
@@ -313,39 +325,21 @@ export function makeLookup(session, { env = process.env } = {}) {
   }
 }
 
-export async function main() {
-  let event
-  try {
-    event = JSON.parse(readFileSync(0, 'utf8') || '{}')
-  } catch {
-    return // unreadable event: no opinion
-  }
-  let reason = null
-  try {
-    const cwd = event.cwd ?? process.cwd()
-    // Judged as the session making THIS tool call.
-    const lookup = makeLookup(currentSession(process.env, event))
-    const tool = event.tool_name
-    reason =
-      tool === 'Bash'
-        ? bashVerdict({ command: event.tool_input?.command, cwd, lookup })
-        : verdict({
-            tool,
-            filePath: event.tool_input?.file_path ?? event.tool_input?.notebook_path,
-            cwd,
-            lookup,
-          })
-  } catch {
-    return // a bug in here must not wedge the session
-  }
-  if (!reason) return
-  console.log(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: reason,
-      },
-    }),
-  )
+/** A PreToolUse guard (see hooks/index.mjs): its message denies the call. */
+export const event = 'PreToolUse'
+
+/** @param {any} input  @param {{ env: NodeJS.ProcessEnv }} opts */
+export function decide(input, { env }) {
+  const cwd = input.cwd ?? process.cwd()
+  // Judged as the session making THIS tool call.
+  const lookup = makeLookup(currentSession(env, input), { env })
+  const tool = input.tool_name
+  return tool === 'Bash'
+    ? bashVerdict({ command: input.tool_input?.command, cwd, lookup })
+    : verdict({
+        tool,
+        filePath: input.tool_input?.file_path ?? input.tool_input?.notebook_path,
+        cwd,
+        lookup,
+      })
 }

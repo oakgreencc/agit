@@ -34,11 +34,10 @@
  *
  * Quoted text is DATA and a `sh -c` payload is a COMMAND — see shell-text.mjs.
  *
- * Fails OPEN: any crash or unparseable payload exits 0 rather than wedging
- * every Bash call in the session.
+ * Fails OPEN, like every hook the host runs (hooks/index.mjs): any crash or
+ * unparseable payload answers nothing rather than wedging every Bash call.
  */
-import { readFileSync } from 'node:fs'
-import { maskQuoted, shellPayloads, statements } from './shell-text.mjs'
+import { executedCommands, statements } from './shell-text.mjs'
 
 /** Start of a command: string start, or after a real (unquoted) separator. */
 const CMD_START = '(?:^|[;&|(\\n`]|&&|\\|\\|)\\s*'
@@ -304,42 +303,31 @@ It is the READ path only: \`git push\` stays refused either way.`,
  * @param {Record<string, string | undefined>} [env]
  */
 export function violation(command, env = process.env) {
-  const payloads = shellPayloads(command)
-  const masked = [maskQuoted(command), ...payloads.map(maskQuoted)]
-  const raw = [command, ...payloads]
+  const commands = executedCommands(command)
   for (const rule of RULES) {
     // `unless` asks about the session; `allow` asks about this command.
     if (rule.unless?.(env)) continue
-    if ((rule.raw ? raw : masked).some((s) => rule.re.test(s) && !rule.allow?.(s))) return rule
+    if (commands.some((c) => {
+      const s = rule.raw ? c.raw : c.masked
+      return rule.re.test(s) && !rule.allow?.(s)
+    }))
+      return rule
   }
   return null
 }
 
-/** The hook's JSON answer for a hit. */
-export function denial(hit) {
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'deny',
-      // A rule with its own `fix` replaces the general guidance: "publish with
-      // agit" is the wrong answer to "your fetch was about to touch the key".
-      permissionDecisionReason: `Blocked (${hit.id}): ${hit.why}\n\n${hit.fix ?? GUIDANCE}`,
-    },
-  }
+/** The denial text for a hit. */
+export function reasonFor(hit) {
+  // A rule with its own `fix` replaces the general guidance: "publish with
+  // agit" is the wrong answer to "your fetch was about to touch the key".
+  return `Blocked (${hit.id}): ${hit.why}\n\n${hit.fix ?? GUIDANCE}`
 }
 
-export async function main() {
-  let command = ''
-  try {
-    command = JSON.parse(readFileSync(0, 'utf8'))?.tool_input?.command ?? ''
-  } catch {
-    return // no stdin or unparseable payload — fail open
-  }
-  let hit = null
-  try {
-    hit = violation(command)
-  } catch {
-    return // a bug in here must not wedge the session
-  }
-  if (hit) console.log(JSON.stringify(denial(hit)))
+/** A PreToolUse guard (see hooks/index.mjs): its message denies the call. */
+export const event = 'PreToolUse'
+
+/** @param {any} input  @param {{ env: NodeJS.ProcessEnv }} opts */
+export function decide(input, { env }) {
+  const hit = violation(input?.tool_input?.command ?? '', env)
+  return hit ? reasonFor(hit) : null
 }

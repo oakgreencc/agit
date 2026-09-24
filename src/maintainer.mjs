@@ -77,12 +77,14 @@ export function currentSession(env = process.env, event = null) {
 /**
  * @typedef {{ reason: string, scopes: string[], grantedAt: string, expiresAt: string, session: string, via: string }} GrantFile
  * @typedef {(
- *   | { state: 'none' }
- *   | { state: 'invalid', why: string }
- *   | { state: 'expired', grant: GrantFile }
+ *   | { state: 'none', session?: string | null }
+ *   | { state: 'invalid', why: string, session?: string | null }
+ *   | { state: 'expired', grant: GrantFile, session?: string | null }
  *   | { state: 'mismatch', grant: GrantFile, session: string | null }
  *   | { state: 'active', grant: GrantFile, session: string }
  * )} GrantView
+ *   `session` is the session ASKING — every refusal's advice names it, so the
+ *   human's `--session` points at the session that was refused.
  */
 
 /**
@@ -92,21 +94,22 @@ export function currentSession(env = process.env, event = null) {
  * @returns {GrantView}
  */
 export function readGrant({ path, session = currentSession(), now = Date.now() }) {
-  if (!existsSync(path)) return { state: 'none' }
+  const asking = typeof session === 'string' ? session.trim() : ''
+  const who = asking || null
+  if (!existsSync(path)) return { state: 'none', session: who }
   let raw
   try {
     raw = JSON.parse(readFileSync(path, 'utf8'))
   } catch {
-    return { state: 'invalid', why: 'grant file is not valid JSON' }
+    return { state: 'invalid', why: 'grant file is not valid JSON', session: who }
   }
   if (!raw?.reason || !raw?.expiresAt || !Array.isArray(raw?.scopes))
-    return { state: 'invalid', why: 'grant file lacks reason, expiresAt or scopes' }
+    return { state: 'invalid', why: 'grant file lacks reason, expiresAt or scopes', session: who }
   const expires = Date.parse(raw.expiresAt)
-  if (Number.isNaN(expires)) return { state: 'invalid', why: 'expiresAt is not a date' }
-  if (expires <= now) return { state: 'expired', grant: raw }
+  if (Number.isNaN(expires)) return { state: 'invalid', why: 'expiresAt is not a date', session: who }
+  if (expires <= now) return { state: 'expired', grant: raw, session: who }
   const grantee = typeof raw.session === 'string' ? raw.session.trim() : ''
-  const asking = typeof session === 'string' ? session.trim() : ''
-  if (!grantee || grantee !== asking) return { state: 'mismatch', grant: raw, session: asking || null }
+  if (!grantee || grantee !== asking) return { state: 'mismatch', grant: raw, session: who }
   return { state: 'active', grant: raw, session: asking }
 }
 
@@ -124,7 +127,7 @@ export function allows(view, scope) {
  */
 export function grantAdvice(view, scope) {
   const g = /** @type {any} */ (view).grant
-  const session = view.state === 'mismatch' ? view.session : view.state === 'active' ? view.session : currentSession()
+  const session = view.session !== undefined ? view.session : currentSession()
   let state
   switch (view.state) {
     case 'none':

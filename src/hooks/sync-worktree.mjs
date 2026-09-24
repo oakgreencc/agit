@@ -28,19 +28,8 @@
  *
  * Every failure is reported and none is fatal: the hook always exits 0.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { resolveContext } from '../context.mjs'
-
-/** Emit the hook's one JSON object. */
-function say(message) {
-  if (!message) return
-  process.stdout.write(
-    `${JSON.stringify({
-      systemMessage: message,
-      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: message },
-    })}\n`,
-  )
-}
 
 /**
  * The worktree path: from the tool's result text ("Created worktree at <path>
@@ -92,16 +81,8 @@ export function sync(event, { env = process.env } = {}) {
   }
 }
 
-export async function main() {
-  let event
-  try {
-    event = JSON.parse(readFileSync(0, 'utf8'))
-  } catch {
-    return
-  }
-  try {
-    say(sync(event))
-  } catch {
-    // never wedge
-  }
-}
+/** A PostToolUse notice (see hooks/index.mjs): its message is shown, never blocks. */
+export const event = 'PostToolUse'
+
+/** @param {any} input  @param {{ env: NodeJS.ProcessEnv }} opts */
+export const decide = (input, { env }) => sync(input, { env })

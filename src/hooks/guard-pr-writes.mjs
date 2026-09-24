@@ -30,7 +30,6 @@
  * is still a merge. The cost is a false positive on a command that merely
  * mentions one, which is a denial with a readable reason.
  */
-import { readFileSync } from 'node:fs'
 
 /** A merge expressed as a REST path. The number is loose so `$N` is caught too. */
 const PR_MERGE = /\/repos\/([^/\s'"`]+)\/([^/\s'"`]+)\/pulls\/([^/\s'"`]+)\/merge\b/g
@@ -80,34 +79,21 @@ export function reasonFor(targets) {
   )
 }
 
-export async function main() {
-  let command = ''
+/** A PreToolUse guard (see hooks/index.mjs): its message denies the call. */
+export const event = 'PreToolUse'
+
+/**
+ * A parser failure throws, and the host fails open: nothing has matched yet.
+ * Once a merge write HAS matched, every path ends in a denial.
+ *
+ * @param {any} input
+ */
+export function decide(input) {
+  const targets = findTargets(input?.tool_input?.command ?? '')
+  if (!targets.length) return null
   try {
-    command = JSON.parse(readFileSync(0, 'utf8'))?.tool_input?.command ?? ''
-  } catch {
-    return // unparseable payload, nothing matched yet — fail open
-  }
-  let targets = []
-  try {
-    targets = findTargets(command)
-  } catch {
-    return // a parser bug must not wedge every Bash call
-  }
-  if (!targets.length) return
-  // From here the command IS a merge write, so every path ends in a denial.
-  let reason
-  try {
-    reason = reasonFor(targets)
+    return reasonFor(targets)
   } catch (err) {
-    reason = `Blocked: guard failed while checking this PR write: ${/** @type {Error} */ (err).message}`
+    return `Blocked: guard failed while checking this PR write: ${/** @type {Error} */ (err).message}`
   }
-  console.log(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: reason,
-      },
-    }),
-  )
 }
