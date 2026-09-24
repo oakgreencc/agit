@@ -1,0 +1,6 @@
+{
+  "name": "agit",
+  "version": "0.1.0",
+  "description": "Work a GitHub project as a GitHub App: Verified commits, the repo's git hooks, CODEOWNERS-protected paths, and a scoped maintainer mode.",
+  "license": "AGPL-3.0-only"
+}

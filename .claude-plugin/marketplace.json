@@ -1,0 +1,11 @@
+{
+  "name": "agit",
+  "owner": { "name": "James Loosli" },
+  "plugins": [
+    {
+      "name": "agit",
+      "source": "./",
+      "description": "Work a GitHub project as a GitHub App: Verified commits, the repo's git hooks, CODEOWNERS-protected paths, and a scoped maintainer mode."
+    }
+  ]
+}
