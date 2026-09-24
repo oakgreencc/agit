@@ -34,6 +34,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PublishError } from '../errors.mjs'
 import {
   batchByBytes,
   blobShas,
@@ -60,8 +61,7 @@ export const BLOB_PACE_MS = 1000
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const noop = () => {}
 
-/** A refusal the CLI prints as-is, distinct from a crash. */
-export class PublishError extends Error {}
+export { PublishError }
 
 const lines = (s) =>
   s
@@ -93,25 +93,14 @@ export function dirtyPaths(git, paths = null) {
  * gates in the CLI have passed, so a refusal leaves no stray branch behind.
  */
 export async function resolveBranch({ client, owner, repo, branch }) {
-  let sha
-  try {
-    sha = (await client.api(`/repos/${owner}/${repo}/git/ref/heads/${branch}`)).object.sha
-  } catch (err) {
-    if (/: 404 /.test(String(/** @type {Error} */ (err)?.message))) return null
-    throw err
-  }
-  return commitOnGitHub({ client, owner, repo, sha })
+  const ref = await client.getOrNull(`/repos/${owner}/${repo}/git/ref/heads/${branch}`)
+  return ref ? commitOnGitHub({ client, owner, repo, sha: ref.object.sha }) : null
 }
 
 /** `{ sha, tree }` for a commit GitHub holds, or `null` when it does not. */
 export async function commitOnGitHub({ client, owner, repo, sha }) {
-  try {
-    const c = await client.api(`/repos/${owner}/${repo}/git/commits/${sha}`)
-    return { sha: c.sha, tree: c.tree.sha }
-  } catch (err) {
-    if (/: 404 /.test(String(/** @type {Error} */ (err)?.message))) return null
-    throw err
-  }
+  const c = await client.getOrNull(`/repos/${owner}/${repo}/git/commits/${sha}`)
+  return c ? { sha: c.sha, tree: c.tree.sha } : null
 }
 
 // ---------------------------------------------------------------------------
@@ -530,19 +519,36 @@ export function advance({ git, target }) {
 // ---------------------------------------------------------------------------
 
 /**
+ * What a publish WOULD land, after the tree is built and before anything is
+ * sent: the tree, the commit it builds on, and the paths it changes. For a
+ * merge, `paths` is only the resolution — content that is neither parent's.
+ *
+ * @typedef {{ kind: 'worktree' | 'merge', base: Head, tree: string, parents: string[], paths: string[] }} Candidate
+ */
+
+/** The paths `tree` changes relative to `from`, as diff-tree reports them. */
+function changedBetween(git, from, tree) {
+  return parseDiffTree(git(['diff-tree', '-r', '--no-renames', '-z', from, tree]))
+}
+
+/**
  * Publish the worktree's uncommitted, in-scope changes as one commit on
  * `branch`, creating the branch from `base` when it does not exist.
  *
- * The caller has already run the gates (freshness, validated base,
- * displacement) and fetched the branch so `head.sha` exists locally. Returns
- * the created commit and what changed.
+ * The caller has fetched the branch so `head.sha` exists locally. `gate`, when
+ * given, judges the CANDIDATE — the tree as built, pre-commit hook included —
+ * and throws to refuse; it runs before the message hooks and before anything
+ * reaches GitHub. Returns the created commit and the paths it changed.
  *
  * @typedef {{ sha: string, tree: string, branch?: string }} Head
  * @typedef {{
  *   preCommit?: (env: Record<string, string>) => void,
  *   commitMessage?: (message: string) => string,
- *   prePush?: (commit: { tree: string, parents: string[], message: string }) => void | Promise<void>,
+ *   prePush?: (commit: PushedCommit) => void | Promise<void>,
  * }} PublishHooks
+ * @typedef {{ sha: string } | { tree: string, parents: string[], message: string, sha?: string }} PushedCommit
+ *   `sha`: a local commit that already IS what lands (a fast-forward, an
+ *   unchanged merge); otherwise the hook is shown a twin made from the rest.
  *
  * @param {object} input
  * @param {Function} input.git
@@ -559,6 +565,7 @@ export function advance({ git, target }) {
  * @param {(ms: number) => Promise<void>} [input.sleep]
  * @param {number} [input.pace]
  * @param {PublishHooks} [input.hooks]   the repository's git hooks, see git-hooks.mjs
+ * @param {(candidate: Candidate) => void | Promise<void>} [input.gate]   see plan.mjs
  */
 export async function publishWorktree({
   git,
@@ -575,9 +582,10 @@ export async function publishWorktree({
   sleep,
   pace,
   hooks,
+  gate,
 }) {
   const target = /** @type {Head} */ (head ?? base)
-  const { tree, changed } = worktreeTree({
+  const { tree } = worktreeTree({
     git,
     base: target.sha,
     paths,
@@ -587,6 +595,12 @@ export async function publishWorktree({
   if (!tree) throw new PublishError('no changes in worktree')
   if (tree === target.tree)
     throw new PublishError('nothing to publish: the tree is identical to the branch head.')
+  // The gates judge what would land — the tree as built, whatever the
+  // pre-commit hook staged into it — not the list of paths that went in.
+  if (gate) {
+    const changed = changedBetween(git, target.sha, tree).map((e) => e.path)
+    await gate({ kind: 'worktree', base: target, tree, parents: [target.sha], paths: changed })
+  }
   // Everything local happens before anything is sent: the message hooks, then
   // pre-push against a local twin of the commit GitHub will create.
   const finalMessage = hooks?.commitMessage ? hooks.commitMessage(message) : message
@@ -613,7 +627,7 @@ export async function publishWorktree({
     parents: [target.sha],
   })
   await moveRef({ client, owner, repo, branch, sha: commit.sha, create: !head })
-  return { commit, changed, shipped, created: !head, message: finalMessage }
+  return { commit, changed: shipped.entries.map((e) => e.path), shipped, created: !head, message: finalMessage }
 }
 
 /**
@@ -621,7 +635,13 @@ export async function publishWorktree({
  * commit created by GitHub — Verified as the App, with the agent's resolved
  * tree.
  *
- * @param {{ git: Function, client: any, owner: string, repo: string, branch: string, head: Head, message?: string | null, report?: (line: string) => void, sleep?: (ms: number) => Promise<void>, pace?: number }} input
+ * The same moments as a publish, where they apply: `gate` judges the
+ * candidate (its `paths` are the resolution — content that is neither
+ * parent's; what came whole from a side was reviewed where it came from);
+ * `hooks.commitMessage` runs on a `message` override (the local commit already
+ * ran it on its own); `hooks.prePush` runs before anything is sent.
+ *
+ * @param {{ git: Function, client: any, owner: string, repo: string, branch: string, head: Head, message?: string | null, report?: (line: string) => void, sleep?: (ms: number) => Promise<void>, pace?: number, hooks?: PublishHooks, gate?: (candidate: Candidate) => void | Promise<void> }} input
  * @returns {Promise<{ kind: 'fast-forward', commit: { sha: string, verified: null } } | { kind: 'merge', commit: any, shipped: any, parents: string[] }>}
  */
 export async function publishMerge({
@@ -635,6 +655,8 @@ export async function publishMerge({
   report,
   sleep,
   pace,
+  hooks,
+  gate,
 }) {
   const local = localMerge({ git, branchHead: head.sha })
 
@@ -648,9 +670,26 @@ export async function publishMerge({
           'Publish merges a completed local merge, or fast-forwards to a commit already on GitHub.',
       )
     }
+    await hooks?.prePush?.({ sha: local.sha })
     await moveRef({ client, owner, repo, branch, sha: local.sha })
     return { kind: 'fast-forward', commit: { sha: local.sha, verified: null } }
   }
+
+  if (gate) {
+    const fromTheirs = new Set(changedBetween(git, local.parents[1], local.tree).map((e) => e.path))
+    const resolved = changedBetween(git, head.sha, local.tree)
+      .map((e) => e.path)
+      .filter((p) => fromTheirs.has(p))
+    await gate({ kind: 'merge', base: head, tree: local.tree, parents: local.parents, paths: resolved })
+  }
+  const finalMessage = message ? (hooks?.commitMessage ? hooks.commitMessage(message) : message) : local.message
+  // The local merge commit IS the twin when its message stands.
+  await hooks?.prePush?.({
+    tree: local.tree,
+    parents: local.parents,
+    message: finalMessage,
+    ...(message ? {} : { sha: local.sha }),
+  })
 
   const mergedIn = await commitOnGitHub({ client, owner, repo, sha: local.parents[1] })
   if (!mergedIn) {
@@ -684,7 +723,7 @@ export async function publishMerge({
     client,
     owner,
     repo,
-    message: message ?? local.message,
+    message: finalMessage,
     tree: local.tree,
     parents: local.parents,
   })

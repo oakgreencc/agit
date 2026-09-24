@@ -19,14 +19,13 @@
  * nothing.
  */
 
-import { mergeableBases, merge as mergeConfig, DEFAULTS, PROJECT_FILE } from '../config.mjs'
-import { findCodeowners, CODEOWNERS_LOCATIONS } from '../codeowners.mjs'
+import { mergeableBases } from '../config.mjs'
 import { flag, has, positionals } from '../context.mjs'
 import { allows, grantAdvice } from '../maintainer.mjs'
 import { baseHealth, mergeVerdict, rescueFacts } from '../pr-policy.mjs'
-import { createPolicy } from '../protected.mjs'
-import { PublishError } from '../publish/publish.mjs'
-import { contextFrom } from './common.mjs'
+import { policyFrom, snapshot } from '../protected.mjs'
+import { PublishError } from '../errors.mjs'
+import { COMMON_VALUE_FLAGS, contextFrom } from './common.mjs'
 
 const USAGE = `usage: agit pr merge <n> [--method merge|squash|rebase] [--auto] [--repo <owner/repo>]
        agit pr update <n> [--repo <owner/repo>]`
@@ -36,65 +35,32 @@ const METHODS = ['merge', 'squash', 'rebase']
 /**
  * A file's text on `ref` through the contents API, or `null` when absent.
  *
- * @param {any} client
+ * @param {import('../github/app.mjs').Client} client
  */
 async function fileAt(client, owner, repo, path, ref) {
-  try {
-    const f = await client.api(`/repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`)
-    if (!f || typeof f.content !== 'string') return null
-    return Buffer.from(f.content, 'base64').toString('utf8')
-  } catch (err) {
-    if (/: 404 /.test(String(/** @type {Error} */ (err)?.message))) return null
-    throw err
-  }
+  const f = await client.getOrNull(`/repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`)
+  return f && typeof f.content === 'string' ? Buffer.from(f.content, 'base64').toString('utf8') : null
 }
 
 /**
  * The protection policy as GitHub will enforce it: CODEOWNERS and `.agit.json`
  * read from the BASE branch, not the worktree (which is what an agent could
- * have edited) and not a local `origin/<base>` (which may be stale).
+ * have edited) and not a local `origin/<base>` (which may be stale). Nothing
+ * in it comes from the worktree — not even when the base has no `.agit.json`.
  */
-export async function policyOnBase({ client, owner, repo, base, fallback }) {
-  const texts = new Map()
-  for (const p of [...CODEOWNERS_LOCATIONS, PROJECT_FILE]) texts.set(p, await fileAt(client, owner, repo, p, base))
-  let config = fallback
-  const raw = texts.get(PROJECT_FILE)
-  if (raw) {
-    try {
-      config = mergeConfig(DEFAULTS, JSON.parse(raw))
-    } catch {
-      config = fallback // an unparseable base policy: judge by the local one
-    }
-  }
-  return { policy: createPolicy({ config, codeowners: findCodeowners((p) => texts.get(p) ?? null) }), config }
-}
-
-/** Every page of a list endpoint. */
-async function paginate(client, path) {
-  const all = []
-  /** @type {string | null} */
-  let next = path
-  while (next) {
-    const { res, json } = await client.raw(next)
-    if (!Array.isArray(json)) break
-    all.push(...json)
-    next = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1] ?? null
-  }
-  return all
+export async function policyOnBase({ client, owner, repo, base }) {
+  return policyFrom(await snapshot((p) => fileAt(client, owner, repo, p, base)))
 }
 
 /**
  * @param {string[]} argv
- * @param {{ cwd?: string }} [opts]
+ * @param {{ client?: import('../github/app.mjs').Client }} [deps]
  */
-export async function run(argv, { cwd = process.cwd() } = {}) {
-  const [sub, numberArg] = positionals(argv, ['--method', '--repo', '-C'])
+export async function run(argv, { client: given } = {}) {
+  const [sub, numberArg] = positionals(argv, [...COMMON_VALUE_FLAGS, '--method'])
   const number = Number(numberArg)
-  if (!['merge', 'update'].includes(sub) || !Number.isInteger(number) || number <= 0) {
-    console.error(USAGE)
-    process.exit(1)
-  }
-  const ctx = contextFrom(argv.includes('-C') ? argv : [...argv, '-C', cwd], { needRoot: false })
+  if (!['merge', 'update'].includes(sub) || !Number.isInteger(number) || number <= 0) throw new PublishError(USAGE)
+  const ctx = contextFrom(argv, { needRoot: false, client: given })
   const { owner, repo, full } = ctx.repo()
   const client = await ctx.client()
   const pr = await client.api(`/repos/${owner}/${repo}/pulls/${number}`)
@@ -112,20 +78,23 @@ export async function run(argv, { cwd = process.cwd() } = {}) {
   if (!METHODS.includes(method)) throw new PublishError(`--method must be one of ${METHODS.join(', ')}`)
 
   const base = pr.base.ref
-  const { policy, config: baseConfig } = await policyOnBase({ client, owner, repo, base, fallback: ctx.config })
-  const check = baseConfig.requiredCheck ?? ctx.config.requiredCheck
+  const policy = await policyOnBase({ client, owner, repo, base })
+  const baseConfig = policy.config
+  const check = baseConfig.requiredCheck
   const get = (path) => client.api(path)
   const grant = ctx.grant()
   const granted = allows(grant, 'merge')
 
   const out = await mergeVerdict({
     pr: { number, base, headSha: pr.head.sha },
-    allowedBases: mergeableBases(baseConfig, baseConfig.baseBranch ?? (await ctx.baseBranch())),
+    // The base's own `baseBranch`, else GitHub's default — never the worktree's.
+    allowedBases: mergeableBases(baseConfig, baseConfig.baseBranch ?? (await ctx.defaultBranch())),
     policy,
+    policyProblem: policy.configProblem,
     requiredCheck: check,
     granted,
     lookups: {
-      files: async () => (await paginate(client, `/repos/${owner}/${repo}/pulls/${number}/files?per_page=100`)).map((f) => f.filename),
+      files: async () => (await client.paginate(`/repos/${owner}/${repo}/pulls/${number}/files?per_page=100`)).map((f) => f.filename),
       baseRed: check ? () => baseHealth({ get, owner, repo, base, check }) : undefined,
       rescue: check ? () => rescueFacts({ get, owner, repo, base, headSha: pr.head.sha, check }) : undefined,
     },

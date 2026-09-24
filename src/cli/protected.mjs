@@ -24,6 +24,7 @@ export async function run(argv) {
   const paths = [...positionals(argv, [...COMMON_VALUE_FLAGS, '--ref']), ...(has(argv, '--changed') ? dirtyPaths(ctx.git) : [])]
 
   console.log(`CODEOWNERS: ${policy.codeownersPath ?? '(none — only .agit.json extras and self-protected files apply)'}`)
+  if (policy.configProblem) console.log(`  ! ${policy.configProblem} — judged by the defaults`)
   for (const u of policy.unsupported) console.log(`  ! ${u}`)
   if (!paths.length) return 0
 

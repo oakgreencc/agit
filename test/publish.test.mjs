@@ -15,6 +15,7 @@ import {
   worktreeTree,
 } from '../src/publish/publish.mjs'
 import { createClient } from '../src/github/app.mjs'
+import { clientOver } from './fixtures.mjs'
 
 const sha = (c) => c.repeat(40)
 const HEAD = sha('a')
@@ -29,24 +30,18 @@ const BLOB_THEIRS = sha('3')
  * A fake GitHub. `routes` maps `METHOD /path` to a handler `(body) => json`
  * (or a status number to fail with). Every call is recorded with its parsed
  * body so a test can assert on exactly what was sent — the point of the
- * commit-body test in particular.
+ * commit-body test in particular. The client over it is the real one.
  */
 function fakeClient(routes) {
   const calls = []
-  const dispatch = async (path, init = {}) => {
-    const method = (init.method ?? 'GET').toUpperCase()
-    const body = init.body ? JSON.parse(init.body) : undefined
+  const client = clientOver(async (method, path, body) => {
     calls.push({ method, path, body })
     const handler = routes[`${method} ${path}`]
     if (handler === undefined) throw new Error(`${path}: 404 {"message":"Not Found"}`)
     if (typeof handler === 'number') throw new Error(`${path}: ${handler} {"message":"nope"}`)
     return typeof handler === 'function' ? handler(body) : handler
-  }
-  return {
-    calls,
-    api: dispatch,
-    json: (path, method, body) => dispatch(path, { method, body: JSON.stringify(body) }),
-  }
+  })
+  return Object.assign(client, { calls })
 }
 
 /**

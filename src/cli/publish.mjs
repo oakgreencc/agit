@@ -2,46 +2,37 @@
 /**
  * `publish`, `merge`, `advance` — the write path, and the gates in front of it.
  *
- * Gate order is cost order, and every gate runs before the first write, so a
- * refusal leaves nothing on GitHub:
+ * Every gate runs before the first write, so a refusal leaves nothing on
+ * GitHub. In order:
  *
  *   1. scope          --paths or --all, named — before any credential is read
  *   2. no-verify      skipping the repo's hooks needs a `no-verify` grant
- *   3. protection     CODEOWNERS-protected paths need a `protected` grant;
- *                     impossible paths are refused outright
- *   4. validated base the green you are relying on is about THIS base
- *   5. displacement   a stale worktree would silently revert these paths
- *   6. payload        no *.log, no path growing by more than the ceiling
- *   7. git hooks      pre-commit → commit-msg → pre-push, on the exact tree
+ *   3. validated base the green you are relying on is about THIS base
+ *   4. the tree       built locally; the pre-commit hook runs here, and what it
+ *                     stages ships
+ *   5. the candidate  protection → displacement → payload, judged on the tree
+ *                     as built (src/publish/plan.mjs), not on the path list
+ *   6. git hooks      commit-msg, then pre-push on a twin of the commit
  *
  * Then: blobs → tree (sha checked against the local tree) → commit (no
  * author, committer or signature, so GitHub signs it) → fast-forward the ref
  * → open the PR → advance the worktree onto the commit.
+ *
+ * This file is the command line around that: flags into overrides, the
+ * fetches the tree build needs, and what gets printed.
  */
 
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { withClosingTrailers } from '../closing-refs.mjs'
 import { flag, has, positionals } from '../context.mjs'
-import { displacementMessage, findDisplacement } from '../gates/drift.mjs'
-import {
-  BOTH_SCOPES_MESSAGE,
-  noPrNote,
-  payloadMessage,
-  payloadRefusalsInWorktree,
-  sweepMessage,
-} from '../gates/scope.mjs'
+import { PublishError } from '../errors.mjs'
+import { BOTH_SCOPES_MESSAGE, noPrNote, sweepMessage } from '../gates/scope.mjs'
 import { checkValidatedBase, readReceipt } from '../gates/validated-base.mjs'
-import { hookRunner, previewCommit } from '../git-hooks.mjs'
+import { hookRunner } from '../git-hooks.mjs'
 import { allows, grantAdvice } from '../maintainer.mjs'
-import {
-  PublishError,
-  advance,
-  dirtyPaths,
-  publishMerge,
-  publishWorktree,
-  resolveBranch,
-} from '../publish/publish.mjs'
+import { judgeCandidate } from '../publish/plan.mjs'
+import { advance, dirtyPaths, publishMerge, publishWorktree, resolveBranch } from '../publish/publish.mjs'
 import { COMMON_VALUE_FLAGS, contextFrom } from './common.mjs'
 
 export const PUBLISH_USAGE =
@@ -63,7 +54,7 @@ const PUBLISH_VALUE_FLAGS = [
 /** @typedef {import('../context.mjs').Context} Context */
 
 // ---------------------------------------------------------------------------
-// The gates
+// The gates that run before the tree exists
 // ---------------------------------------------------------------------------
 
 /**
@@ -104,54 +95,6 @@ function noVerifyGate({ ctx, argv }) {
   return true
 }
 
-/**
- * Protection gate. The policy is read from the BASE as GitHub will enforce it
- * (the worktree's CODEOWNERS is exactly what an agent could have edited) and
- * from the worktree too; a path either one protects is protected.
- *
- * @param {{ ctx: Context, base: string, paths: string[] }} input
- */
-function protectionGate({ ctx, base, paths }) {
-  if (!paths.length) return
-  const policies = [ctx.localPolicy()]
-  try {
-    ctx.git(['rev-parse', '--verify', '--quiet', `origin/${base}^{commit}`])
-    policies.unshift(ctx.policyAt(`origin/${base}`))
-  } catch {
-    // Base not fetched: the worktree's policy is all there is to go on.
-  }
-  const hits = new Map()
-  for (const policy of policies) for (const h of policy.checkAll(paths)) if (!hits.has(h.path)) hits.set(h.path, h)
-  if (!hits.size) return
-
-  const all = [...hits.values()]
-  const impossible = all.filter((h) => h.tier === 'impossible')
-  if (impossible.length) {
-    throw new PublishError(
-      `refusing to publish: ${impossible.length} path${impossible.length === 1 ? '' : 's'} cannot be written by the App at all:\n\n` +
-        impossible.map((h) => `  ${h.path} — ${h.why}`).join('\n') +
-        '\n\nNo grant unlocks these: the App does not hold the permission. Describe the exact\n' +
-        'change and hand it to a human to apply. Leave these paths out of --paths.',
-    )
-  }
-  const view = ctx.grant()
-  if (allows(view, 'protected')) {
-    console.log(
-      `protected paths published under maintainer grant ("${/** @type {any} */ (view).grant.reason}"): ` +
-        `${all.map((h) => h.path).join(', ')} — the PR still needs the code owners' review.`,
-    )
-    return
-  }
-  throw new PublishError(
-    `refusing to publish: ${all.length} path${all.length === 1 ? ' is' : 's are'} protected — they decide what the gates\n` +
-      'catch, what an agent may do, or what reaches production, so a human approves them:\n\n' +
-      all.map((h) => `  ${h.path} — ${h.why}`).join('\n') +
-      '\n\n' +
-      grantAdvice(view, 'protected') +
-      '\nOr leave them out of --paths and publish the rest.',
-  )
-}
-
 /** Validated-base gate. See gates/validated-base.mjs. */
 function validatedBaseGate({ ctx, base, argv }) {
   const receipt = readReceipt({ gitDir: ctx.gitDir() })
@@ -170,56 +113,35 @@ function validatedBaseGate({ ctx, base, argv }) {
   if (refusal) throw new PublishError(refusal)
 }
 
-/**
- * Displacement gate. See gates/drift.mjs. Fetches the target branch first so
- * its head exists locally, which the tree build needs anyway. Fails closed: an
- * unverifiable base is exactly the case that produced the incidents.
- */
-function displacementGate({ ctx, base, branch, head, paths, argv }) {
-  const { git } = ctx
+// ---------------------------------------------------------------------------
+// Shared pieces
+// ---------------------------------------------------------------------------
+
+/** Fetch without failing: whatever cannot be fetched, a later step refuses by name. */
+function tryFetch(git, ref) {
   try {
-    git(['fetch', 'origin', head.branch])
+    git(['fetch', 'origin', ref])
   } catch {
-    // Reported below if the object is genuinely missing.
+    // see above
   }
+}
+
+/**
+ * The commit the tree builds on must exist locally — fetched, not assumed.
+ * Fails closed: an unverifiable base is exactly the case the displacement
+ * gate exists for.
+ */
+function ensureLocal({ git, head }) {
+  tryFetch(git, head.branch)
   try {
     git(['cat-file', '-e', `${head.sha}^{commit}`])
   } catch {
     throw new PublishError(
       `refusing to publish: could not fetch ${head.sha.slice(0, 7)} (${head.branch}) to verify this worktree is up to date.\n` +
-        'Check that `git fetch origin` works here (agit doctor), or pass --allow-displacement if you accept\n' +
-        'the risk of reverting files.',
+        'Check that `git fetch origin` works here (agit doctor).',
     )
   }
-  if (has(argv, '--allow-displacement')) return
-  let worktreeBase
-  try {
-    worktreeBase = git(['rev-parse', 'HEAD']).trim()
-  } catch {
-    return // a worktree with no commits has nothing to be stale against
-  }
-  const displaced = findDisplacement({ git, worktreeBase, branchHead: head.sha, paths })
-  if (displaced.length)
-    throw new PublishError(displacementMessage(displaced, { base, branch, worktreeBase, branchHead: head.sha }))
 }
-
-/** Payload gate. See gates/scope.mjs. */
-function payloadGate({ ctx, head, paths, argv }) {
-  const refused = payloadRefusalsInWorktree({
-    git: ctx.git,
-    worktree: /** @type {string} */ (ctx.root),
-    head: head.sha,
-    paths,
-    allow: flag(argv, '--allow-large')?.split(',') ?? [],
-    ceiling: ctx.config.payload.ceilingBytes,
-    neverPublish: ctx.config.payload.neverPublish,
-  })
-  if (refused.length) throw new PublishError(payloadMessage(refused, { ceiling: ctx.config.payload.ceilingBytes }))
-}
-
-// ---------------------------------------------------------------------------
-// Shared pieces
-// ---------------------------------------------------------------------------
 
 /** The branch head on GitHub, or where the branch would start. */
 async function resolveTarget({ client, owner, repo, branch, base }) {
@@ -242,6 +164,50 @@ async function hasOpenPr({ client, owner, repo, branch }) {
   }
 }
 
+/**
+ * The candidate gate, wired to this Context: the base's policy (as fetched)
+ * first, then the worktree's; the session's grant; the project's payload
+ * limits; the command line's overrides. Prints what it let through.
+ *
+ * @param {{ ctx: Context, base: string, branch: string, argv: string[] }} input
+ */
+function candidateGate({ ctx, base, branch, argv }) {
+  const policies = [ctx.localPolicy()]
+  try {
+    ctx.git(['rev-parse', '--verify', '--quiet', `origin/${base}^{commit}`])
+    policies.unshift(ctx.policyAt(`origin/${base}`))
+  } catch {
+    // Base not fetched: the worktree's policy is all there is to go on.
+  }
+  return (/** @type {import('../publish/publish.mjs').Candidate} */ candidate) => {
+    const notes = judgeCandidate({
+      git: ctx.git,
+      candidate,
+      policies,
+      grant: ctx.grant(),
+      payload: ctx.config.payload,
+      overrides: {
+        allowLarge: flag(argv, '--allow-large')?.split(',') ?? [],
+        allowDisplacement: has(argv, '--allow-displacement'),
+      },
+      names: { base, branch },
+    })
+    for (const n of notes) console.log(n)
+  }
+}
+
+/** The repository's hook runner, wired to the publish primitive's moments. */
+function publishHooks({ ctx, skip, branch, remoteSha }) {
+  const runner = hookRunner({
+    git: ctx.git,
+    root: /** @type {string} */ (ctx.root),
+    config: ctx.config,
+    skip,
+    report: (line) => console.error(line),
+  })
+  return { runner, hooks: runner.forPublish({ branch, remoteSha }) }
+}
+
 function reportAdvance(out, branch) {
   if (!out.advanced) {
     console.log(`worktree NOT advanced: ${out.reason}`)
@@ -259,26 +225,6 @@ function reportCommit(commit) {
   const state =
     commit.verified === true ? 'Verified' : commit.verified === false ? `NOT verified (${commit.reason})` : 'existing'
   console.log(`commit: ${commit.url ?? commit.sha}  [${state}]`)
-}
-
-/** The hook runner, wired to the publish primitive's three moments. */
-function publishHooks({ ctx, skip, branch, remoteSha }) {
-  const runner = hookRunner({
-    git: ctx.git,
-    root: /** @type {string} */ (ctx.root),
-    config: ctx.config,
-    skip,
-    report: (line) => console.error(line),
-  })
-  return {
-    runner,
-    hooks: {
-      preCommit: (env) => runner.preCommit(env),
-      commitMessage: (message) => runner.commitMessage(message),
-      prePush: ({ tree, parents, message }) =>
-        runner.prePush({ branch, localSha: previewCommit({ git: ctx.git, tree, parents, message }), remoteSha }),
-    },
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -319,19 +265,13 @@ export async function runPublish(argv) {
     skipped: notClosing,
   } = withClosingTrailers({ message, prBody: prBody ?? undefined, closes: flag(argv, '--closes') ?? undefined })
 
-  try {
-    git(['fetch', 'origin', base])
-  } catch {
-    // The gates below fail closed on what they cannot see.
-  }
-  protectionGate({ ctx, base, paths: dirtyPaths(git, paths) })
+  tryFetch(git, base) // the gates below fail closed on what they cannot see
   validatedBaseGate({ ctx, base, argv })
 
   // READ-ONLY until every gate has passed: a refusal leaves nothing on GitHub.
   const { head, baseHead } = await resolveTarget({ client, owner, repo, branch, base })
   const target = /** @type {any} */ (head ?? baseHead)
-  displacementGate({ ctx, base, branch, head: target, paths, argv })
-  payloadGate({ ctx, head: target, paths, argv })
+  ensureLocal({ git, head: target })
   const noPr = !prTitle && !(head && (await hasOpenPr({ client, owner, repo, branch })))
 
   const { runner, hooks } = publishHooks({ ctx, skip: skipHooks, branch, remoteSha: head?.sha ?? null })
@@ -347,6 +287,7 @@ export async function runPublish(argv) {
     paths,
     report: (line) => console.error(line),
     hooks,
+    gate: candidateGate({ ctx, base, branch, argv }),
   })
   if (runner.ran.length) console.log(`hooks: ${runner.ran.join(', ')}`)
   if (out.created && baseHead) console.log(`created ${branch} from ${base} @ ${baseHead.sha.slice(0, 7)}`)
@@ -387,7 +328,7 @@ export async function runPublish(argv) {
 // ---------------------------------------------------------------------------
 
 const MERGE_USAGE =
-  'usage: agit merge <branch> [--message <text>] [--base <b>] [--no-advance] [--no-verify] [--stale-base-ok] [-C <dir>] [--repo <owner/repo>]\n\n' +
+  'usage: agit merge <branch> [--message <text>] [--base <b>] [--allow-large a,b] [--no-advance] [--no-verify] [--stale-base-ok] [-C <dir>] [--repo <owner/repo>]\n\n' +
   'Publishes the worktree\'s completed local merge (git fetch → git merge origin/<x> → resolve →\n' +
   'git commit) as a two-parent commit GitHub creates, Verified as the App.'
 
@@ -396,7 +337,7 @@ export async function runMerge(argv) {
     console.log(MERGE_USAGE)
     return 0
   }
-  const [branch] = positionals(argv, [...COMMON_VALUE_FLAGS, '--message', '--base'])
+  const [branch] = positionals(argv, [...COMMON_VALUE_FLAGS, '--message', '--base', '--allow-large'])
   if (!branch) throw new PublishError(MERGE_USAGE)
   const ctx = contextFrom(argv)
   const { git } = ctx
@@ -405,49 +346,16 @@ export async function runMerge(argv) {
   const { owner, repo, full } = ctx.repo()
   const base = flag(argv, '--base') ?? (await ctx.baseBranch())
 
-  try {
-    git(['fetch', 'origin', base])
-  } catch {
-    // see publish
-  }
+  tryFetch(git, base)
   // A merge of the base in is exactly when the receipt matters: a receipt
   // older than the merge means the merged tree was never validated here.
   validatedBaseGate({ ctx, base, argv })
 
   const head = await resolveBranch({ client, owner, repo, branch })
   if (!head) throw new PublishError(`branch ${branch} does not exist on GitHub; merge publishes onto an existing branch`)
-  try {
-    git(['fetch', 'origin', branch])
-  } catch {
-    // localMerge() reports a stale first parent with the fix.
-  }
+  tryFetch(git, branch) // localMerge() reports a stale first parent with the fix
 
-  // Protection: the paths whose merged content is NEITHER side's — the
-  // agent's own resolution. Content taken whole from either parent was
-  // reviewed where it came from.
-  let parents = []
-  try {
-    parents = git(['rev-list', '--parents', '-n', '1', 'HEAD']).trim().split(/\s+/).slice(1)
-  } catch {
-    parents = []
-  }
-  if (parents.length === 2) {
-    const names = (a) =>
-      new Set(
-        git(['diff', '--name-only', '-z', a, 'HEAD'])
-          .split('\0')
-          .filter(Boolean),
-      )
-    const fromFirst = names(parents[0])
-    const resolved = [...names(parents[1])].filter((p) => fromFirst.has(p))
-    protectionGate({ ctx, base, paths: resolved })
-  }
-
-  const { runner } = publishHooks({ ctx, skip: skipHooks, branch, remoteSha: head.sha })
-  // The local merge commit ran the commit hooks when it was made; pre-push is
-  // the one left, on HEAD itself.
-  runner.prePush({ branch, localSha: git(['rev-parse', 'HEAD']).trim(), remoteSha: head.sha })
-
+  const { hooks } = publishHooks({ ctx, skip: skipHooks, branch, remoteSha: head.sha })
   const out = await publishMerge({
     git,
     client,
@@ -457,6 +365,8 @@ export async function runMerge(argv) {
     head,
     message: flag(argv, '--message') ?? undefined,
     report: (line) => console.error(line),
+    hooks,
+    gate: candidateGate({ ctx, base, branch, argv }),
   })
   if (out.kind === 'fast-forward') {
     console.log(`fast-forwarded ${full}@${branch} to ${out.commit.sha.slice(0, 7)}`)

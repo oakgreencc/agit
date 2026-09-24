@@ -23,6 +23,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { projectFor } from '../context.mjs'
 import { readAppCredentials, cachedInstallationToken } from '../github/app.mjs'
 
 /** Parse git's `key=value` credential protocol. */
@@ -35,6 +36,35 @@ export function parseCredentialInput(text) {
   )
 }
 
+/**
+ * The helper's answer to one `get`, or `null` for "not mine". `mint` is the
+ * token source, injectable so a test can see which App was chosen.
+ *
+ * @param {Record<string, string>} fields
+ * @param {{ cwd?: string, env?: NodeJS.ProcessEnv, mint?: typeof cachedInstallationToken }} [deps]
+ */
+export async function answer(fields, { cwd = process.cwd(), env = process.env, mint = cachedInstallationToken } = {}) {
+  if (fields.protocol !== 'https' || fields.host !== 'github.com') return null
+  const [owner, repo] = (fields.path ?? '').replace(/\.git$/, '').split('/')
+  if (!owner || !repo) return null
+
+  // The project's `app` pin governs the fetch exactly as it governs the
+  // publish: git and the API must act as the same App.
+  let creds
+  try {
+    creds = readAppCredentials({ owner, project: projectFor({ owner, repo, cwd, env }), env })
+  } catch {
+    return null // no App for this owner: not mine
+  }
+  try {
+    const token = await mint({ owner, repo, appId: creds.appId, keyPem: creds.keyPem, env })
+    return `username=x-access-token\npassword=${token}\n`
+  } catch (err) {
+    console.error(`agit credential: ${owner}/${repo}: ${/** @type {Error} */ (err).message.split('\n')[0]}`)
+    return null
+  }
+}
+
 export async function run(argv) {
   // `get` is the only operation with an answer. store/erase are no-ops:
   // nothing is persisted by git — the token comes from agit's own cache.
@@ -45,21 +75,7 @@ export async function run(argv) {
   } catch {
     return 0
   }
-  if (fields.protocol !== 'https' || fields.host !== 'github.com') return 0
-  const [owner, repo] = (fields.path ?? '').replace(/\.git$/, '').split('/')
-  if (!owner || !repo) return 0
-
-  let creds
-  try {
-    creds = readAppCredentials({ owner })
-  } catch {
-    return 0 // no App for this owner: not mine
-  }
-  try {
-    const token = await cachedInstallationToken({ owner, repo, appId: creds.appId, keyPem: creds.keyPem })
-    process.stdout.write(`username=x-access-token\npassword=${token}\n`)
-  } catch (err) {
-    console.error(`agit credential: ${owner}/${repo}: ${/** @type {Error} */ (err).message.split('\n')[0]}`)
-  }
+  const out = await answer(fields)
+  if (out) process.stdout.write(out)
   return 0
 }
