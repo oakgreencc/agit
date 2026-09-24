@@ -34,7 +34,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { agitHome, loadUserConfig } from '../config.mjs'
 import { flag, has } from '../context.mjs'
-import { appDir, appJwt, request } from '../github/app.mjs'
+import { appDir, asApp, request } from '../github/app.mjs'
 import { appManifest, installUrl, newAppUrl } from './manifest.mjs'
 import { createPrompter } from './prompt.mjs'
 
@@ -186,8 +186,7 @@ export async function waitForInstallation({
   })
   const deadline = Date.now() + timeoutMs
   for (;;) {
-    const headers = { Authorization: `Bearer ${appJwt({ appId, keyPem })}` }
-    const { json } = await request('/app/installations', { headers }, fetch)
+    const { json } = await asApp({ appId, keyPem }, fetch)('/app/installations')
     if (Array.isArray(json) && json.length) return json
     if (skipped || Date.now() >= deadline) return []
     await sleep(intervalMs)
@@ -297,7 +296,7 @@ async function manualApp(argv, { fetch, prompt, env }) {
   if (!existsSync(keyPath)) throw new Error(`no such file: ${keyPath}`)
   const pem = readFileSync(keyPath, 'utf8')
   // Prove the pair works before storing it: GET /app answers only for a valid JWT.
-  const { json } = await request('/app', { headers: { Authorization: `Bearer ${appJwt({ appId, keyPem: pem })}` } }, fetch)
+  const { json } = await asApp({ appId, keyPem: pem }, fetch)('/app')
   const saved = saveApp({ app: { ...json, id: json?.id ?? appId, pem }, env })
   say(`✓ ${json.slug} (id ${json.id}) stored in ${saved.dir}`)
   return { slug: json.slug, appId: String(json.id ?? appId), owner: saved.owner }

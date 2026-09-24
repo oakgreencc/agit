@@ -31,10 +31,11 @@ export function contextOptions(argv, { cwd, repo = null, env } = {}) {
 
 /**
  * @param {string[]} argv
- * @param {{ needRoot?: boolean, repo?: string | null }} [opts] `repo` is used when --repo is absent
+ * @param {{ needRoot?: boolean, repo?: string | null, client?: import('../github/app.mjs').Client | null }} [opts]
+ *   `repo` is used when --repo is absent; `client` replaces the minted one (tests)
  */
-export function contextFrom(argv, { needRoot = true, repo = null } = {}) {
-  const ctx = resolveContext(contextOptions(argv, { repo }))
+export function contextFrom(argv, { needRoot = true, repo = null, client = null } = {}) {
+  const ctx = resolveContext({ ...contextOptions(argv, { repo }), client })
   if (needRoot) ctx.requireRoot()
   const refusal = versionRefusal(ctx.config.minVersion)
   if (refusal) throw new PublishError(refusal)

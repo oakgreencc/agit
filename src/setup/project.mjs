@@ -26,7 +26,7 @@ import { CODEOWNERS_LOCATIONS, findCodeowners, ownersOf, parseCodeowners } from 
 import { PROJECT_FILE } from '../config.mjs'
 import { contextOptions } from '../cli/common.mjs'
 import { flag, has, resolveContext } from '../context.mjs'
-import { NoAppError, readAppCredentials } from '../github/app.mjs'
+import { NoAppError, isNotFound, readAppCredentials } from '../github/app.mjs'
 import { installUrl } from './manifest.mjs'
 import { createPrompter } from './prompt.mjs'
 import { claudeHooks, envToPairs, gitConfigEnv, mergeSettings } from './settings.mjs'
@@ -151,7 +151,7 @@ export async function setupProject(argv, deps = {}) {
       meta = await client.api(`/repos/${owner}/${repo}`)
     } catch (err) {
       if (err instanceof NoAppError) throw new Error(`${err.message}\nCreate one first: agit setup app`)
-      if (/: 404 /.test(String(/** @type {Error} */ (err)?.message))) {
+      if (isNotFound(err)) {
         throw new Error(
           `the App is not installed on ${full} (GitHub answered 404).\n` +
             'Install it on this repository — https://github.com/apps/<your-app>/installations/new — and run this again.',

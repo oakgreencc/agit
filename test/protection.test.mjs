@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { policyOnBase } from '../src/cli/pr.mjs'
 import { mergeVerdict } from '../src/pr-policy.mjs'
 import { POLICY_FILES, judge, policyFrom, readAtRef, readAtRoot, snapshot } from '../src/protected.mjs'
+import { clientOver } from './fixtures.mjs'
 
 const CODEOWNERS = '/ci/ @alice\n'
 /** A reader over a map of path → text. */
@@ -133,15 +134,14 @@ test('readAtRef vs readAtRoot: a base without .agit.json is the defaults, NOT th
 // pr merge: the base policy, as the contents API has it
 // ---------------------------------------------------------------------------
 
-/** A client whose contents API serves `files` on any ref, 404 otherwise. */
-const contentsClient = (files) => ({
-  api: async (path) => {
+/** The real client over a contents API that serves `files` on any ref, 404 otherwise. */
+const contentsClient = (files) =>
+  clientOver((method, path) => {
     const m = /\/contents\/(.+)\?ref=/.exec(path)
     const text = m ? files[m[1]] : undefined
-    if (text === undefined) throw Object.assign(new Error(`${path}: 404 {"message":"Not Found"}`), { status: 404 })
+    if (text === undefined) throw new Error(`${path}: 404 {"message":"Not Found"}`)
     return { content: Buffer.from(text).toString('base64') }
-  },
-})
+  })
 
 test('policyOnBase: read from the base alone — a base with no .agit.json does not borrow the worktree\'s', async () => {
   const policy = await policyOnBase({ client: contentsClient({ '.github/CODEOWNERS': CODEOWNERS }), owner: 'o', repo: 'r', base: 'main' })

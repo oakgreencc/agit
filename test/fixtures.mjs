@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULTS, merge } from '../src/config.mjs'
 import { hookRunner } from '../src/git-hooks.mjs'
+import { createClient } from '../src/github/app.mjs'
 
 /**
  * Every git call here runs with the global and system config MASKED. A
@@ -160,58 +161,123 @@ export function fakeGitHub(bare) {
       g(['update-ref', body.ref, body.sha])
       return {}
     }
-    // The release path's one extra endpoint (release.mjs): the repository
-    // node id `updateRefs` addresses. No `POST /git/tags` — the release
-    // makes no tag object (see `graphql` below).
-    if (key === 'GET /repos/o/r') return { node_id: 'R_bare' }
+
+    // --- what `agit pr merge` reads, answered from the bare repo -----------
+    if (key === 'GET /repos/o/r') return { default_branch: 'develop' }
+    const contents = /^GET \/repos\/o\/r\/contents\/(.+)\?ref=(.+)$/.exec(key)
+    if (contents) {
+      try {
+        const text = g(['show', `refs/heads/${decodeURIComponent(contents[2])}:${contents[1]}`])
+        return { content: Buffer.from(text).toString('base64') }
+      } catch {
+        throw err(404, path)
+      }
+    }
+    const pull = /^GET \/repos\/o\/r\/pulls\/(\d+)(\/files\?.*)?$/.exec(key)
+    if (pull) {
+      const pr = pulls.get(Number(pull[1]))
+      if (!pr) throw err(404, path)
+      const headSha = g(['rev-parse', `refs/heads/${pr.head}`]).trim()
+      if (pull[2]) {
+        const names = g(['diff', '--name-only', `refs/heads/${pr.base}...${headSha}`]).split('\n').filter(Boolean)
+        return names.map((filename) => ({ filename }))
+      }
+      return {
+        number: pr.number,
+        state: pr.merged ? 'closed' : 'open',
+        merged: !!pr.merged,
+        node_id: `PR_${pr.number}`,
+        base: { ref: pr.base },
+        head: { ref: pr.head, sha: headSha },
+      }
+    }
+    const compare = /^GET \/repos\/o\/r\/compare\/([^.]+)\.\.\.([0-9a-f]{40})$/.exec(key)
+    if (compare) {
+      const behind = g(['rev-list', '--count', `${compare[2]}..refs/heads/${decodeURIComponent(compare[1])}`]).trim()
+      return { behind_by: Number(behind) }
+    }
+    const runs = /^GET \/repos\/o\/r\/commits\/([^/]+)\/check-runs\?/.exec(key)
+    if (runs) {
+      const run = checks.get(decodeURIComponent(runs[1]))
+      return { check_runs: run ? [{ status: 'completed', html_url: 'https://ci/run', ...run }] : [] }
+    }
+    const merge = /^PUT \/repos\/o\/r\/pulls\/(\d+)\/merge$/.exec(key)
+    if (merge) {
+      const pr = pulls.get(Number(merge[1]))
+      if (!pr) throw err(404, path)
+      if (g(['rev-parse', `refs/heads/${pr.head}`]).trim() !== body.sha) throw err(409, path)
+      pr.merged = true
+      return { sha: body.sha, merged: true }
+    }
     throw err(404, path)
   }
-  /**
-   * GraphQL `updateRefs`, as a `git update-ref --stdin` transaction: every
-   * line is checked before any ref moves, so a stale `beforeOid` or an
-   * existing tag rejects the whole batch — the property the release path
-   * relies on for "branch and tags together or not at all".
-   *
-   * `afterOid` must name a COMMIT. GitHub refuses a tag object with
-   * `Invalid object type tag, expected commit` — which is what the first
-   * live run of the release path hit (CD 34903903689, 2026-09-14) and why
-   * the tags are lightweight. The fake refuses the same way.
-   */
-  async function graphql(query, variables) {
-    calls.push({ method: 'GRAPHQL', path: 'updateRefs', body: variables })
-    assert.match(query, /updateRefs\(/)
-    const lines = variables.input.refUpdates.map(({ name, beforeOid, afterOid, force }) => {
-      assert.equal(force, false)
-      const type = g(['cat-file', '-t', afterOid]).trim()
-      if (type !== 'commit') {
-        throw new Error(
-          `graphql: [{"type":"UNPROCESSABLE","path":["updateRefs"],"message":"Invalid object type ${type}, expected commit"}]`,
-        )
-      }
-      return /^0{40}$/.test(beforeOid)
-        ? `create ${name} ${afterOid}`
-        : `update ${name} ${afterOid} ${beforeOid}`
-    })
-    try {
-      g(['update-ref', '--stdin'], { input: `start\n${lines.join('\n')}\ncommit\n` })
-    } catch (e) {
-      throw new Error(
-        `graphql: [{"type":"UNPROCESSABLE","message":${JSON.stringify(String(/** @type {any} */ (e).stderr ?? /** @type {any} */ (e).message))}}]`,
-      )
-    }
-    return { updateRefs: { clientMutationId: null } }
-  }
-  return {
+
+  /** @type {Map<number, { number: number, head: string, base: string, merged?: boolean }>} */
+  const pulls = new Map()
+  /** @type {Map<string, { conclusion: string }>} */
+  const checks = new Map()
+  return Object.assign(clientOver(handle), {
     calls,
-    api: (path, init = {}) =>
-      handle(
-        (init.method ?? 'GET').toUpperCase(),
-        path,
-        init.body ? JSON.parse(init.body) : undefined,
-      ),
-    json: (path, method, body) => handle(method, path, body),
-    graphql,
+    /** Open PR `number` from `head` into `base` (both branches on the bare repo). */
+    openPull: (number, head, base) => pulls.set(number, { number, head, base }),
+    /** The required check's latest run on `ref` (a branch name or a sha). */
+    setCheck: (ref, conclusion) => checks.set(ref, { conclusion }),
+    pulls,
+  })
+}
+
+/**
+ * A commit on the bare "GitHub" — someone else's merge, a PR branch — made
+ * with plumbing: `files` (path → text) over `from`'s tree (default: the
+ * branch itself), and `branch` moved to it. Returns the new sha.
+ *
+ * @param {string} bare
+ * @param {string} branch
+ * @param {Record<string, string>} files
+ * @param {{ from?: string, message?: string }} [opts]
+ */
+export function commitOn(bare, branch, files, { from = branch, message = 'else' } = {}) {
+  const parent = run(bare, ['rev-parse', `refs/heads/${from}`]).trim()
+  const idx = { GIT_INDEX_FILE: join(bare, `commit-index-${process.pid}`) }
+  try {
+    unlinkSync(idx.GIT_INDEX_FILE)
+  } catch {}
+  run(bare, ['read-tree', parent], { env: idx })
+  for (const [path, text] of Object.entries(files)) {
+    const blob = run(bare, ['hash-object', '-w', '--stdin'], { input: text }).trim()
+    run(bare, ['update-index', '--add', '--cacheinfo', `100644,${blob},${path}`], { env: idx })
   }
+  const tree = run(bare, ['write-tree'], { env: idx }).trim()
+  const sha = run(bare, ['commit-tree', tree, '-p', parent, '-m', message]).trim()
+  run(bare, ['update-ref', `refs/heads/${branch}`, sha])
+  return sha
+}
+
+/**
+ * The REAL client (`createClient`) over a fake GitHub: `handle(method, path,
+ * body)` answers like the API — returns the JSON, or throws
+ * `<path>: <status> <body>`. Only `fetch` is fake, so paging, not-found
+ * handling and retries are the client's own code, the same as in production.
+ *
+ * @param {(method: string, path: string, body: any) => any} handle
+ */
+export function clientOver(handle) {
+  /** @type {typeof globalThis.fetch} */
+  const fetch = async (url, init = {}) => {
+    const path = String(url).replace(/^https:\/\/api\.github\.com/, '')
+    const method = (init.method ?? 'GET').toUpperCase()
+    const body = typeof init.body === 'string' && init.body ? JSON.parse(init.body) : undefined
+    let out
+    try {
+      out = await handle(method, path, body)
+    } catch (e) {
+      const m = /: (\d{3}) ([\s\S]*)$/.exec(String(/** @type {Error} */ (e)?.message))
+      if (!m) throw e
+      return new Response(m[2], { status: Number(m[1]) })
+    }
+    return new Response(out === undefined ? '' : JSON.stringify(out), { status: 200 })
+  }
+  return createClient({ token: 'fake', fetch, sleep: async () => {} })
 }
 
 /** A worktree cloned from a fresh bare "GitHub" with one base commit on `develop`. */

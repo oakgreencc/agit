@@ -93,25 +93,14 @@ export function dirtyPaths(git, paths = null) {
  * gates in the CLI have passed, so a refusal leaves no stray branch behind.
  */
 export async function resolveBranch({ client, owner, repo, branch }) {
-  let sha
-  try {
-    sha = (await client.api(`/repos/${owner}/${repo}/git/ref/heads/${branch}`)).object.sha
-  } catch (err) {
-    if (/: 404 /.test(String(/** @type {Error} */ (err)?.message))) return null
-    throw err
-  }
-  return commitOnGitHub({ client, owner, repo, sha })
+  const ref = await client.getOrNull(`/repos/${owner}/${repo}/git/ref/heads/${branch}`)
+  return ref ? commitOnGitHub({ client, owner, repo, sha: ref.object.sha }) : null
 }
 
 /** `{ sha, tree }` for a commit GitHub holds, or `null` when it does not. */
 export async function commitOnGitHub({ client, owner, repo, sha }) {
-  try {
-    const c = await client.api(`/repos/${owner}/${repo}/git/commits/${sha}`)
-    return { sha: c.sha, tree: c.tree.sha }
-  } catch (err) {
-    if (/: 404 /.test(String(/** @type {Error} */ (err)?.message))) return null
-    throw err
-  }
+  const c = await client.getOrNull(`/repos/${owner}/${repo}/git/commits/${sha}`)
+  return c ? { sha: c.sha, tree: c.tree.sha } : null
 }
 
 // ---------------------------------------------------------------------------

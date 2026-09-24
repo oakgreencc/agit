@@ -7,13 +7,13 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DEFAULTS } from '../src/config.mjs'
 import { judgeCandidate } from '../src/publish/plan.mjs'
 import { PublishError, advance, publishMerge, publishWorktree, resolveBranch } from '../src/publish/publish.mjs'
 import { policyFrom } from '../src/protected.mjs'
-import { hookScenario, must, run, scenario } from './fixtures.mjs'
+import { commitOn, hookScenario, must, run, scenario } from './fixtures.mjs'
 
 /** A protection policy owning `secret/`, as a base's CODEOWNERS would. */
 const POLICY = policyFrom((p) => (p === 'CODEOWNERS' ? '/secret/ @alice\n' : null))
@@ -118,22 +118,7 @@ test('plan: a *.log the pre-commit hook stages is refused by the payload gate', 
 })
 
 /** develop moves on "GitHub": each of `files` gets new content in one new commit. */
-function moveDevelop(bare, files) {
-  const develop = run(bare, ['rev-parse', 'refs/heads/develop']).trim()
-  const idx = { GIT_INDEX_FILE: join(bare, 'move-index') }
-  try {
-    unlinkSync(idx.GIT_INDEX_FILE)
-  } catch {}
-  run(bare, ['read-tree', develop], { env: idx })
-  for (const [path, text] of Object.entries(files)) {
-    const blob = run(bare, ['hash-object', '-w', '--stdin'], { input: text }).trim()
-    run(bare, ['update-index', '--add', '--cacheinfo', `100644,${blob},${path}`], { env: idx })
-  }
-  const tree = run(bare, ['write-tree'], { env: idx }).trim()
-  const moved = run(bare, ['commit-tree', tree, '-p', develop, '-m', 'else']).trim()
-  run(bare, ['update-ref', 'refs/heads/develop', moved])
-  return moved
-}
+const moveDevelop = (bare, files) => commitOn(bare, 'develop', files)
 
 test('plan: displacement is judged over the paths that land — a stale path refuses, a stale bystander does not', async () => {
   const s = scenario()

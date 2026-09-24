@@ -24,7 +24,7 @@ import { mergeableBases } from '../config.mjs'
 import { contextOptions } from '../cli/common.mjs'
 import { has, resolveContext } from '../context.mjs'
 import { findHook, hooksDir } from '../git-hooks.mjs'
-import { appJwt, readAppCredentials, request } from '../github/app.mjs'
+import { asApp, readAppCredentials } from '../github/app.mjs'
 import { describe } from '../maintainer.mjs'
 import { SELF_PROTECTED } from '../protected.mjs'
 import { WITHHELD_PERMISSIONS } from './manifest.mjs'
@@ -195,8 +195,7 @@ export async function run(argv, deps = {}) {
     }
     if (creds) {
       try {
-        const headers = { Authorization: `Bearer ${appJwt(creds)}` }
-        const { json } = await request(`/repos/${owner}/${repo}/installation`, { headers })
+        const { json } = await asApp(creds)(`/repos/${owner}/${repo}/installation`)
         add(ok(`App installed on ${owner}/${repo}`))
         add(...permissionFindings(json?.permissions))
       } catch (err) {

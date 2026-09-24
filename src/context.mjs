@@ -50,9 +50,10 @@ export const gitIn =
 export const progress = (line) => console.error(line)
 
 /**
- * @param {{ cwd?: string, repo?: string | null, env?: NodeJS.ProcessEnv }} [input]
+ * @param {{ cwd?: string, repo?: string | null, env?: NodeJS.ProcessEnv, client?: import('./github/app.mjs').Client | null }} [input]
+ *   `client`: use this client instead of minting one — a test's, over a fake GitHub
  */
-export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env = process.env } = {}) {
+export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env = process.env, client: given = null } = {}) {
   const start = isAbsolute(cwd) ? cwd : resolve(cwd)
   let root
   try {
@@ -119,7 +120,8 @@ export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env 
 
     /** An authenticated client for the repo's owner, as the App. */
     client() {
-      return once('client', () => {
+      return once('client', async () => {
+        if (given) return given
         const { owner, repo } = ctx.repo()
         return clientFor({ owner, repo, project: ctx.config, env, report: progress })
       })

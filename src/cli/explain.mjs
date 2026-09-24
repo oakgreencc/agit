@@ -6,7 +6,8 @@
  */
 export function explain(err) {
   const msg = String(/** @type {any} */ (err)?.message ?? err)
-  const status = /: (\d{3}) /.exec(msg)?.[1]
+  // `request` attaches the status; the `<path>: <status>` message is the fallback.
+  const status = String(/** @type {any} */ (err)?.status ?? /: (\d{3}) /.exec(msg)?.[1] ?? '')
   if (/** @type {any} */ (err)?.name === 'NoAppError') return null // its message is the advice
   if (status === '403' && /not accessible by integration/.test(msg)) {
     return (

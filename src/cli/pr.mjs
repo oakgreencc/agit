@@ -35,17 +35,11 @@ const METHODS = ['merge', 'squash', 'rebase']
 /**
  * A file's text on `ref` through the contents API, or `null` when absent.
  *
- * @param {any} client
+ * @param {import('../github/app.mjs').Client} client
  */
 async function fileAt(client, owner, repo, path, ref) {
-  try {
-    const f = await client.api(`/repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`)
-    if (!f || typeof f.content !== 'string') return null
-    return Buffer.from(f.content, 'base64').toString('utf8')
-  } catch (err) {
-    if (/: 404 /.test(String(/** @type {Error} */ (err)?.message))) return null
-    throw err
-  }
+  const f = await client.getOrNull(`/repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`)
+  return f && typeof f.content === 'string' ? Buffer.from(f.content, 'base64').toString('utf8') : null
 }
 
 /**
@@ -58,26 +52,15 @@ export async function policyOnBase({ client, owner, repo, base }) {
   return policyFrom(await snapshot((p) => fileAt(client, owner, repo, p, base)))
 }
 
-/** Every page of a list endpoint. */
-async function paginate(client, path) {
-  const all = []
-  /** @type {string | null} */
-  let next = path
-  while (next) {
-    const { res, json } = await client.raw(next)
-    if (!Array.isArray(json)) break
-    all.push(...json)
-    next = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1] ?? null
-  }
-  return all
-}
-
-/** @param {string[]} argv */
-export async function run(argv) {
+/**
+ * @param {string[]} argv
+ * @param {{ client?: import('../github/app.mjs').Client }} [deps]
+ */
+export async function run(argv, { client: given } = {}) {
   const [sub, numberArg] = positionals(argv, [...COMMON_VALUE_FLAGS, '--method'])
   const number = Number(numberArg)
   if (!['merge', 'update'].includes(sub) || !Number.isInteger(number) || number <= 0) throw new PublishError(USAGE)
-  const ctx = contextFrom(argv, { needRoot: false })
+  const ctx = contextFrom(argv, { needRoot: false, client: given })
   const { owner, repo, full } = ctx.repo()
   const client = await ctx.client()
   const pr = await client.api(`/repos/${owner}/${repo}/pulls/${number}`)
@@ -111,7 +94,7 @@ export async function run(argv) {
     requiredCheck: check,
     granted,
     lookups: {
-      files: async () => (await paginate(client, `/repos/${owner}/${repo}/pulls/${number}/files?per_page=100`)).map((f) => f.filename),
+      files: async () => (await client.paginate(`/repos/${owner}/${repo}/pulls/${number}/files?per_page=100`)).map((f) => f.filename),
       baseRed: check ? () => baseHealth({ get, owner, repo, base, check }) : undefined,
       rescue: check ? () => rescueFacts({ get, owner, repo, base, headSha: pr.head.sha, check }) : undefined,
     },
