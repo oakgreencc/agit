@@ -24,7 +24,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { loadProjectConfig, parseRemote } from './config.mjs'
 import { clientFor } from './github/app.mjs'
 import { currentSession, grantPath, logPath, readGrant } from './maintainer.mjs'
-import { policyAtRef, policyAtRoot } from './protected.mjs'
+import { policyFrom, readAtRef, readAtRoot } from './protected.mjs'
 
 /**
  * git in a directory. stderr is piped rather than inherited: several calls in
@@ -179,14 +179,14 @@ export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env 
       return { path: grantPath(dir), log: logPath(dir) }
     },
 
-    /** The protection policy as the worktree has it. */
+    /** The protection policy as the worktree has it — what an edit changes. */
     localPolicy() {
-      return once('localPolicy', () => policyAtRoot(ctx.requireRoot()))
+      return once('localPolicy', () => policyFrom(readAtRoot(ctx.requireRoot())))
     },
 
     /** The protection policy as `ref` has it — what GitHub will enforce. */
     policyAt(ref) {
-      return once(`policy:${ref}`, () => policyAtRef({ git, ref, root: ctx.requireRoot() }))
+      return once(`policy:${ref}`, () => policyFrom(readAtRef(git, ref)))
     },
   }
   return ctx

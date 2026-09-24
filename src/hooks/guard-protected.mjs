@@ -64,8 +64,8 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 
 import { contextForPath } from '../context.mjs'
-import { allows, currentSession, grantAdvice } from '../maintainer.mjs'
-import { createPolicy, normalise } from '../protected.mjs'
+import { currentSession, grantAdvice } from '../maintainer.mjs'
+import { judge, normalise } from '../protected.mjs'
 import { maskQuoted, segments, shellPayloads, tokens } from './shell-text.mjs'
 
 /** Tools whose `file_path` (or `notebook_path`) input is a write. */
@@ -233,10 +233,10 @@ function judgePath({ path, cwd, lookup, how = '' }) {
   if (isAgitState(abs) || isAgitState(path)) return STATE_REASON
   const found = lookup(path, cwd)
   if (!found) return null // outside any checkout: not ours to judge
-  const hit = found.policy.check(found.rel)
-  if (!hit) return null
-  if (hit.tier === 'impossible') return impossibleReason(hit, how)
-  if (allows(found.grant, 'protected')) return null
+  const v = judge({ paths: [found.rel], policies: [found.policy], grant: found.grant })
+  if (v.impossible.length) return impossibleReason(v.impossible[0], how)
+  if (v.ok) return null
+  const hit = v.protected[0]
   return (
     `\`${hit.path}\` is protected — ${hit.why}${how}. It decides what the gates catch, what an\n` +
     'agent may do, or what reaches production, so a human decides when it changes.\n\n' +
@@ -297,13 +297,9 @@ export function makeLookup(session, { env = process.env } = {}) {
     const { ctx, rel } = found
     let entry = cache.get(ctx)
     if (!entry) {
-      let policy
-      try {
-        policy = ctx.localPolicy()
-      } catch {
-        // An unreadable .agit.json still self-protects: the defaults do.
-        policy = createPolicy({})
-      }
+      // An unreadable .agit.json is judged by the defaults, which still
+      // self-protect (see policyFrom).
+      const policy = ctx.localPolicy()
       let grant = /** @type {import('../maintainer.mjs').GrantView} */ ({ state: 'none' })
       try {
         grant = ctx.grant(session ?? null)

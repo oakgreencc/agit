@@ -34,6 +34,7 @@ import {
 import { checkValidatedBase, readReceipt } from '../gates/validated-base.mjs'
 import { hookRunner, previewCommit } from '../git-hooks.mjs'
 import { allows, grantAdvice } from '../maintainer.mjs'
+import { judge } from '../protected.mjs'
 import {
   PublishError,
   advance,
@@ -120,12 +121,8 @@ function protectionGate({ ctx, base, paths }) {
   } catch {
     // Base not fetched: the worktree's policy is all there is to go on.
   }
-  const hits = new Map()
-  for (const policy of policies) for (const h of policy.checkAll(paths)) if (!hits.has(h.path)) hits.set(h.path, h)
-  if (!hits.size) return
-
-  const all = [...hits.values()]
-  const impossible = all.filter((h) => h.tier === 'impossible')
+  const view = ctx.grant()
+  const { impossible, protected: all, lifted } = judge({ paths, policies, grant: view })
   if (impossible.length) {
     throw new PublishError(
       `refusing to publish: ${impossible.length} path${impossible.length === 1 ? '' : 's'} cannot be written by the App at all:\n\n` +
@@ -134,8 +131,8 @@ function protectionGate({ ctx, base, paths }) {
         'change and hand it to a human to apply. Leave these paths out of --paths.',
     )
   }
-  const view = ctx.grant()
-  if (allows(view, 'protected')) {
+  if (!all.length) return
+  if (lifted) {
     console.log(
       `protected paths published under maintainer grant ("${/** @type {any} */ (view).grant.reason}"): ` +
         `${all.map((h) => h.path).join(', ')} — the PR still needs the code owners' review.`,

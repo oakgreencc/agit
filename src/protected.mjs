@@ -30,7 +30,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { CODEOWNERS_LOCATIONS, findCodeowners, ownersOf, parseCodeowners, patternToRegExp } from './codeowners.mjs'
-import { DEFAULTS, PROJECT_FILE, loadProjectConfig, merge } from './config.mjs'
+import { DEFAULTS, PROJECT_FILE, parseProjectConfig } from './config.mjs'
+import { allows } from './maintainer.mjs'
 
 /** Protected regardless of CODEOWNERS: the files that define the protection. */
 export const SELF_PROTECTED = [...CODEOWNERS_LOCATIONS.map((p) => `/${p}`), `/${PROJECT_FILE}`, '/.claude/settings.json']
@@ -89,6 +90,8 @@ export function createPolicy({ config = /** @type {any} */ (DEFAULTS), codeowner
   return {
     check,
     checkAll,
+    config,
+    codeowners,
     codeownersPath: codeowners.path,
     unsupported: rules.filter((r) => r.unsupported).map((r) => /** @type {string} */ (r.unsupported)),
   }
@@ -109,42 +112,115 @@ export function normalise(path) {
   return out.join('/')
 }
 
+// ---------------------------------------------------------------------------
+// Where a policy is read from
+// ---------------------------------------------------------------------------
+
+/** The files a policy is made of. */
+export const POLICY_FILES = [...CODEOWNERS_LOCATIONS, PROJECT_FILE]
+
 /**
- * The policy of the checkout at `root`, reading CODEOWNERS and `.agit.json`
- * from its working tree. Used by the editor hooks, which judge the file as it
- * sits on disk. `agit publish` reads CODEOWNERS from the BASE instead — see
- * `policyAtRef` — because a worktree's copy is exactly what an agent could
- * have edited.
+ * A reader: a repo-relative path's text at SOME place — a worktree, a git
+ * ref, a branch on GitHub — or `null` when it is absent there.
+ *
+ * @typedef {(path: string) => string | null} Reader
  */
-export function policyAtRoot(root) {
-  const config = loadProjectConfig(root)
-  const codeowners = findCodeowners((p) => {
-    const f = join(root, p)
-    return existsSync(f) ? readFileSync(f, 'utf8') : null
-  })
-  return createPolicy({ config, codeowners })
+
+/**
+ * The policy as `read` sees it: CODEOWNERS and `.agit.json` from the same
+ * place, never mixed with another source.
+ *
+ * ONE rule for the config, wherever it is read: absent is the defaults; an
+ * `.agit.json` that does not parse is ALSO judged by the defaults — which
+ * still honour CODEOWNERS and self-protect, so nothing falls open — and is
+ * reported as `configProblem`, so each caller decides whether a policy nobody
+ * wrote is fatal (`pr merge` refuses on it) or a note.
+ *
+ * @param {Reader} read
+ */
+export function policyFrom(read) {
+  let config = parseProjectConfig(null)
+  /** @type {string | null} */
+  let configProblem = null
+  let raw = null
+  try {
+    raw = read(PROJECT_FILE)
+  } catch {
+    raw = null
+  }
+  try {
+    config = parseProjectConfig(raw)
+  } catch (err) {
+    configProblem = /** @type {Error} */ (err).message
+  }
+  return { ...createPolicy({ config, codeowners: findCodeowners(read) }), configProblem }
+}
+
+/** The working tree at `root`: what the editor hooks judge, since that is what an edit changes. */
+export const readAtRoot = (/** @type {string} */ root) => (/** @type {string} */ path) => {
+  const f = join(root, path)
+  return existsSync(f) ? readFileSync(f, 'utf8') : null
 }
 
 /**
- * The policy as of a git ref (`origin/<base>`): CODEOWNERS and `.agit.json` as
- * GitHub will enforce them, not as the worktree has them.
+ * A git ref (`origin/<base>`): the policy as GitHub will enforce it, not as
+ * the worktree has it — a worktree's copy is exactly what an agent could have
+ * edited.
  *
- * @param {{ git: (args: string[]) => string, ref: string, root: string }} input
+ * @param {(args: string[]) => string} git
+ * @param {string} ref
  */
-export function policyAtRef({ git, ref, root }) {
-  const show = (p) => {
-    try {
-      return git(['show', `${ref}:${p}`])
-    } catch {
-      return null
+export const readAtRef = (git, ref) => (/** @type {string} */ path) => {
+  try {
+    return git(['show', `${ref}:${path}`])
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A reader over an async source — a branch on GitHub, through the contents
+ * API — made synchronous by fetching the policy files once, up front.
+ *
+ * @param {(path: string) => Promise<string | null>} fetchText
+ * @returns {Promise<Reader>}
+ */
+export async function snapshot(fetchText) {
+  const texts = new Map()
+  for (const p of POLICY_FILES) texts.set(p, await fetchText(p))
+  return (path) => texts.get(path) ?? null
+}
+
+// ---------------------------------------------------------------------------
+// Judging paths
+// ---------------------------------------------------------------------------
+
+/**
+ * The protection verdict on a set of paths, under one or more policies.
+ *
+ * A path any policy protects is protected; the first policy to name it gives
+ * the reason (callers list the authoritative one — the base's — first).
+ * `impossible` is never lifted. `protected` is lifted when `grant` holds
+ * `scope`. Rendering is the caller's: an edit, a publish and a merge each say
+ * it their own way.
+ *
+ * @param {{ paths: string[], policies: Policy[], grant?: import('./maintainer.mjs').GrantView | null, scope?: string }} input
+ * @returns {{ impossible: Protection[], protected: Protection[], lifted: boolean, ok: boolean }}
+ */
+export function judge({ paths, policies, grant = null, scope = 'protected' }) {
+  const hits = new Map()
+  for (const path of paths) {
+    for (const policy of policies) {
+      const h = policy.check(path)
+      if (h) {
+        if (!hits.has(h.path)) hits.set(h.path, h)
+        break
+      }
     }
   }
-  const rawConfig = show(PROJECT_FILE)
-  let config
-  try {
-    config = rawConfig ? merge(DEFAULTS, JSON.parse(rawConfig)) : loadProjectConfig(root)
-  } catch {
-    config = loadProjectConfig(root)
-  }
-  return createPolicy({ config, codeowners: findCodeowners(show) })
+  const all = [...hits.values()]
+  const impossible = all.filter((h) => h.tier === 'impossible')
+  const guarded = all.filter((h) => h.tier === 'protected')
+  const lifted = guarded.length > 0 && !!grant && allows(grant, scope)
+  return { impossible, protected: guarded, lifted, ok: !impossible.length && (!guarded.length || lifted) }
 }

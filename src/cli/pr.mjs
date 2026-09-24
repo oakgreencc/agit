@@ -19,12 +19,11 @@
  * nothing.
  */
 
-import { mergeableBases, merge as mergeConfig, DEFAULTS, PROJECT_FILE } from '../config.mjs'
-import { findCodeowners, CODEOWNERS_LOCATIONS } from '../codeowners.mjs'
+import { mergeableBases } from '../config.mjs'
 import { flag, has, positionals } from '../context.mjs'
 import { allows, grantAdvice } from '../maintainer.mjs'
 import { baseHealth, mergeVerdict, rescueFacts } from '../pr-policy.mjs'
-import { createPolicy } from '../protected.mjs'
+import { policyFrom, snapshot } from '../protected.mjs'
 import { PublishError } from '../errors.mjs'
 import { COMMON_VALUE_FLAGS, contextFrom } from './common.mjs'
 
@@ -52,21 +51,11 @@ async function fileAt(client, owner, repo, path, ref) {
 /**
  * The protection policy as GitHub will enforce it: CODEOWNERS and `.agit.json`
  * read from the BASE branch, not the worktree (which is what an agent could
- * have edited) and not a local `origin/<base>` (which may be stale).
+ * have edited) and not a local `origin/<base>` (which may be stale). Nothing
+ * in it comes from the worktree — not even when the base has no `.agit.json`.
  */
-export async function policyOnBase({ client, owner, repo, base, fallback }) {
-  const texts = new Map()
-  for (const p of [...CODEOWNERS_LOCATIONS, PROJECT_FILE]) texts.set(p, await fileAt(client, owner, repo, p, base))
-  let config = fallback
-  const raw = texts.get(PROJECT_FILE)
-  if (raw) {
-    try {
-      config = mergeConfig(DEFAULTS, JSON.parse(raw))
-    } catch {
-      config = fallback // an unparseable base policy: judge by the local one
-    }
-  }
-  return { policy: createPolicy({ config, codeowners: findCodeowners((p) => texts.get(p) ?? null) }), config }
+export async function policyOnBase({ client, owner, repo, base }) {
+  return policyFrom(await snapshot((p) => fileAt(client, owner, repo, p, base)))
 }
 
 /** Every page of a list endpoint. */
@@ -106,16 +95,19 @@ export async function run(argv) {
   if (!METHODS.includes(method)) throw new PublishError(`--method must be one of ${METHODS.join(', ')}`)
 
   const base = pr.base.ref
-  const { policy, config: baseConfig } = await policyOnBase({ client, owner, repo, base, fallback: ctx.config })
-  const check = baseConfig.requiredCheck ?? ctx.config.requiredCheck
+  const policy = await policyOnBase({ client, owner, repo, base })
+  const baseConfig = policy.config
+  const check = baseConfig.requiredCheck
   const get = (path) => client.api(path)
   const grant = ctx.grant()
   const granted = allows(grant, 'merge')
 
   const out = await mergeVerdict({
     pr: { number, base, headSha: pr.head.sha },
-    allowedBases: mergeableBases(baseConfig, baseConfig.baseBranch ?? (await ctx.baseBranch())),
+    // The base's own `baseBranch`, else GitHub's default — never the worktree's.
+    allowedBases: mergeableBases(baseConfig, baseConfig.baseBranch ?? (await ctx.defaultBranch())),
     policy,
+    policyProblem: policy.configProblem,
     requiredCheck: check,
     granted,
     lookups: {

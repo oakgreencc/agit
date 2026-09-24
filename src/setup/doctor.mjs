@@ -232,13 +232,7 @@ export async function run(argv, deps = {}) {
 
   // --- CODEOWNERS -----------------------------------------------------------
   const policy = ctx.localPolicy()
-  const coPath = policy.codeownersPath
-  add(
-    ...codeownersFindings(
-      { path: coPath, text: coPath ? readFileSync(join(ctx.root, coPath), 'utf8') : '' },
-      policy.unsupported,
-    ),
-  )
+  add(...codeownersFindings(policy.codeowners, policy.unsupported))
 
   // --- git hooks ------------------------------------------------------------
   try {

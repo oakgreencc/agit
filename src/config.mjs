@@ -128,10 +128,22 @@ export function merge(base, over) {
  */
 export function loadProjectConfig(root) {
   const path = join(root, PROJECT_FILE)
-  if (!existsSync(path)) return /** @type {ProjectConfig} */ (merge(DEFAULTS, {}))
+  return parseProjectConfig(existsSync(path) ? readFileSync(path, 'utf8') : null)
+}
+
+/**
+ * The project config from the text of `.agit.json` wherever it was read — a
+ * worktree, a ref, the contents API — merged over the defaults. `null` (no
+ * file) is the defaults; text that does not parse throws.
+ *
+ * @param {string | null} text
+ * @returns {ProjectConfig}
+ */
+export function parseProjectConfig(text) {
+  if (text === null || text === undefined) return /** @type {ProjectConfig} */ (merge(DEFAULTS, {}))
   let raw
   try {
-    raw = JSON.parse(readFileSync(path, 'utf8'))
+    raw = JSON.parse(text)
   } catch (err) {
     throw new Error(`${PROJECT_FILE}: ${/** @type {Error} */ (err).message}`)
   }
