@@ -61,10 +61,17 @@ export const MAX_HOURS = 24
 export const grantPath = (gitCommonDir) => join(gitCommonDir, 'agit', 'maintainer.json')
 export const logPath = (gitCommonDir) => join(gitCommonDir, 'agit', 'maintainer.log')
 
-/** The session asking, as the environment names it. */
-export function currentSession(env = process.env) {
-  const id = env.CLAUDE_CODE_SESSION_ID || env.AGIT_SESSION || ''
-  return id.trim() || null
+/**
+ * The session asking: a hook event's `session_id` (the session making THAT
+ * tool call), else the environment's `CLAUDE_CODE_SESSION_ID`, else
+ * `AGIT_SESSION`. The one rule, for the CLI and the hooks alike.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @param {{ session_id?: string } | null} [event]
+ */
+export function currentSession(env = process.env, event = null) {
+  const id = event?.session_id || env.CLAUDE_CODE_SESSION_ID || env.AGIT_SESSION || ''
+  return String(id).trim() || null
 }
 
 /**

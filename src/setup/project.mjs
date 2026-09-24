@@ -21,9 +21,10 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { CODEOWNERS_LOCATIONS, findCodeowners, ownersOf, parseCodeowners } from '../codeowners.mjs'
 import { PROJECT_FILE } from '../config.mjs'
+import { contextOptions } from '../cli/common.mjs'
 import { flag, has, resolveContext } from '../context.mjs'
 import { NoAppError, readAppCredentials } from '../github/app.mjs'
 import { installUrl } from './manifest.mjs'
@@ -137,7 +138,7 @@ export async function setupProject(argv, deps = {}) {
   if (has(argv, '--help')) return say(USAGE)
   const prompt = deps.prompt ?? createPrompter({ yes: has(argv, '--yes') })
   try {
-    const ctx = resolveContext({ cwd: deps.cwd ?? (flag(argv, '-C') ? resolve(/** @type {string} */ (flag(argv, '-C'))) : undefined), repo: flag(argv, '--repo'), env: deps.env })
+    const ctx = resolveContext(contextOptions(argv, deps))
     const root = ctx.requireRoot()
     const { owner, repo, full } = ctx.repo()
     say(`Setting up ${full} in ${root}`)

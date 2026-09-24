@@ -60,12 +60,12 @@
  * was ported from stripped one hard-coded worktree prefix, and the guard was
  * silently off for every session whose worktree lived anywhere else.
  */
-import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 
-import { allows, grantAdvice, grantPath, readGrant } from '../maintainer.mjs'
-import { createPolicy, normalise, policyAtRoot, resolveTarget } from '../protected.mjs'
+import { contextForPath } from '../context.mjs'
+import { allows, currentSession, grantAdvice } from '../maintainer.mjs'
+import { createPolicy, normalise } from '../protected.mjs'
 import { maskQuoted, segments, shellPayloads, tokens } from './shell-text.mjs'
 
 /** Tools whose `file_path` (or `notebook_path`) input is a write. */
@@ -280,40 +280,40 @@ export function bashVerdict({ command, cwd, lookup }) {
 }
 
 /**
- * The real lookup: nearest checkout, its policy from disk, its grant as
- * `session` sees it. Memoised per checkout for the life of one hook call.
+ * The real lookup: the Context of the checkout the path sits in, its policy
+ * from disk, its grant as `session` sees it. Memoised per checkout for the
+ * life of one hook call.
  *
  * @param {string | null | undefined} session
+ * @param {{ env?: NodeJS.ProcessEnv }} [opts]
  * @returns {LookupFn}
  */
-export function makeLookup(session) {
+export function makeLookup(session, { env = process.env } = {}) {
+  const at = contextForPath({ env })
   const cache = new Map()
   return (path, cwd) => {
-    const loc = resolveTarget(path, cwd)
-    if (!loc) return null
-    let entry = cache.get(loc.root)
+    const found = at(path, cwd)
+    if (!found) return null
+    const { ctx, rel } = found
+    let entry = cache.get(ctx)
     if (!entry) {
       let policy
       try {
-        policy = policyAtRoot(loc.root)
+        policy = ctx.localPolicy()
       } catch {
         // An unreadable .agit.json still self-protects: the defaults do.
         policy = createPolicy({})
       }
       let grant = /** @type {import('../maintainer.mjs').GrantView} */ ({ state: 'none' })
       try {
-        const d = execFileSync('git', ['-C', loc.root, 'rev-parse', '--git-common-dir'], {
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        }).trim()
-        grant = readGrant({ path: grantPath(resolve(loc.root, d)), session: session ?? null })
+        grant = ctx.grant(session ?? null)
       } catch {
         // No grant readable is no grant.
       }
       entry = { policy, grant }
-      cache.set(loc.root, entry)
+      cache.set(ctx, entry)
     }
-    return { rel: normalise(loc.rel), ...entry }
+    return { rel: normalise(rel), ...entry }
   }
 }
 
@@ -328,7 +328,7 @@ export async function main() {
   try {
     const cwd = event.cwd ?? process.cwd()
     // Judged as the session making THIS tool call.
-    const lookup = makeLookup(event.session_id ?? process.env.CLAUDE_CODE_SESSION_ID)
+    const lookup = makeLookup(currentSession(process.env, event))
     const tool = event.tool_name
     reason =
       tool === 'Bash'

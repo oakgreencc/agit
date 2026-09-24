@@ -12,6 +12,7 @@
  */
 
 import { appFor, loadUserConfig } from '../config.mjs'
+import { contextOptions } from '../cli/common.mjs'
 import { flag, has, resolveContext } from '../context.mjs'
 import { setupApp } from './app.mjs'
 import { setupProject } from './project.mjs'
@@ -37,7 +38,7 @@ export async function run(argv) {
   let owner = flag(all, '--org') ?? flag(all, '--owner')
   let project = null
   try {
-    const ctx = resolveContext({ repo: flag(all, '--repo') })
+    const ctx = resolveContext(contextOptions(all))
     project = ctx.config
     owner = owner ?? (ctx.root ? ctx.repo().owner : null)
   } catch {

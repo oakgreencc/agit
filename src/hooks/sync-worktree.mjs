@@ -28,9 +28,8 @@
  *
  * Every failure is reported and none is fatal: the hook always exits 0.
  */
-import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { loadProjectConfig } from '../config.mjs'
+import { resolveContext } from '../context.mjs'
 
 /** Emit the hook's one JSON object. */
 function say(message) {
@@ -54,49 +53,36 @@ export function worktreePath(event) {
 }
 
 /**
- * The branch to sync onto, or `null`.
+ * The whole hook, as a function of the event. Returns the message, if any.
+ * The base is Context's offline rule (`baseBranchOffline`): a hook must not
+ * mint a token to find it.
  *
- * @param {(...args: string[]) => string} git
- * @param {string} root
+ * @param {any} event
+ * @param {{ env?: NodeJS.ProcessEnv }} [opts]
  */
-export function baseBranchFor(git, root) {
-  try {
-    const configured = loadProjectConfig(root).baseBranch
-    if (configured) return configured
-  } catch {
-    // An unreadable .agit.json falls through to the remote's HEAD.
-  }
-  try {
-    return git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD').trim().replace(/^origin\//, '')
-  } catch {
-    return null
-  }
-}
-
-/** The whole hook, as a function of the event. Returns the message, if any. */
-export function sync(event) {
+export function sync(event, { env = process.env } = {}) {
   // Entering an EXISTING worktree is deliberate. Only a new one is ours.
   if (event?.tool_input?.path) return null
   const wt = worktreePath(event)
   if (!existsSync(wt)) return null
-  const git = (...args) =>
-    execFileSync('git', ['-C', wt, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 
   let base = null
   try {
-    const root = git('rev-parse', '--show-toplevel').trim()
-    base = baseBranchFor(git, root)
+    const ctx = resolveContext({ cwd: wt, env })
+    if (!ctx.root) return null
+    const { git } = ctx
+    base = ctx.baseBranchOffline()
     if (!base) return null
 
-    if (git('status', '--porcelain').trim()) {
+    if (git(['status', '--porcelain']).trim()) {
       return `Worktree has uncommitted changes, so it was NOT synced to origin/${base}. If it is behind, publishing would revert files — agit's displacement gate will say so.`
     }
-    const before = git('rev-parse', 'HEAD').trim()
-    git('fetch', 'origin', base)
-    const target = git('rev-parse', 'FETCH_HEAD').trim()
+    const before = git(['rev-parse', 'HEAD']).trim()
+    git(['fetch', 'origin', base])
+    const target = git(['rev-parse', 'FETCH_HEAD']).trim()
     if (before === target) return null
     try {
-      git('merge', '--ff-only', 'FETCH_HEAD')
+      git(['merge', '--ff-only', 'FETCH_HEAD'])
     } catch {
       return `Worktree at ${before.slice(0, 7)} could not be fast-forwarded to origin/${base} (${target.slice(0, 7)}) — it has diverged. Left untouched; reconcile it before publishing.`
     }

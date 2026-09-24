@@ -1,19 +1,29 @@
 // @ts-check
 /**
- * Everything a verb needs to know about where it is running, resolved once.
+ * Everything agit needs to know about where it is running, resolved once —
+ * the one answer to "where am I", for every entry point:
  *
- * A verb gets a `Context` from `resolveContext({ cwd })` and asks it for what
- * it uses: the worktree root, a `git` bound to it, the project policy, the
- * `owner/repo`, the base branch, an authenticated client. The expensive parts
- * (the base branch may need an API call; a client needs a token) are lazy and
- * memoised, so a verb that never talks to GitHub never mints a token.
+ *   resolveContext({ cwd })        a verb, from its working directory (`-C`)
+ *   contextForPath(path, cwd)      a hook, from a path a tool call names — the
+ *                                  checkout that path sits in, wherever it is
+ *   projectFor({ owner, repo })    the credential helper: the project config
+ *                                  that pins which App acts for this repo
+ *
+ * A caller asks the Context for what it uses: the worktree root, a `git`
+ * bound to it, the project policy, the `owner/repo`, the base branch, the
+ * common git dir and the maintainer grant in it, an authenticated client. The
+ * expensive parts (the base branch may need an API call; a client needs a
+ * token) are lazy and memoised, so a verb that never talks to GitHub never
+ * mints a token — and `config` itself is read on first use, so a hook that
+ * only needs the protection policy is not refused by a config it can survive.
  */
 
 import { execFileSync } from 'node:child_process'
-import { isAbsolute, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { loadProjectConfig, parseRemote } from './config.mjs'
 import { clientFor } from './github/app.mjs'
-import { grantPath, logPath, readGrant } from './maintainer.mjs'
+import { currentSession, grantPath, logPath, readGrant } from './maintainer.mjs'
 import { policyAtRef, policyAtRoot } from './protected.mjs'
 
 /**
@@ -54,7 +64,6 @@ export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env 
     root = null
   }
   const git = gitIn(root ?? start)
-  const config = root ? loadProjectConfig(root) : loadProjectConfig(start)
 
   const memo = new Map()
   const once = (key, fn) => {
@@ -65,8 +74,17 @@ export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env 
   const ctx = {
     root,
     git,
-    config,
     env,
+
+    /**
+     * The project config at the root, merged over the defaults. Read on first
+     * use; an `.agit.json` that does not parse throws THEN (see config.mjs).
+     *
+     * @returns {import('./config.mjs').ProjectConfig}
+     */
+    get config() {
+      return once('config', () => loadProjectConfig(root ?? start))
+    },
 
     /** The root, or a refusal: most verbs need a checkout. */
     requireRoot() {
@@ -77,7 +95,7 @@ export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env 
     /** `{ owner, repo, full }` from the argument, `.agit.json`, or `origin`. */
     repo() {
       return once('repo', () => {
-        const named = repoArg ?? config.repo
+        const named = repoArg ?? ctx.config.repo
         if (named) {
           const [owner, repo] = String(named).split('/')
           if (!owner || !repo) throw new Error(`not an owner/repo: ${named}`)
@@ -103,17 +121,41 @@ export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env 
     client() {
       return once('client', () => {
         const { owner, repo } = ctx.repo()
-        return clientFor({ owner, repo, project: config, env, report: progress })
+        return clientFor({ owner, repo, project: ctx.config, env, report: progress })
       })
     },
 
-    /** The branch PRs land on: `.agit.json`'s `baseBranch`, else the repo's default. */
+    /**
+     * The branch PRs land on. ONE rule, in two strengths:
+     *
+     *   baseBranch()         `.agit.json`'s `baseBranch`, else the repository's
+     *                        default branch as GitHub reports it now
+     *   baseBranchOffline()  `.agit.json`'s `baseBranch`, else `origin/HEAD` —
+     *                        the default branch as of the last fetch — for a
+     *                        hook that must not mint a token; `null` if neither
+     */
     async baseBranch() {
-      if (config.baseBranch) return config.baseBranch
-      return once('base', async () => {
+      return ctx.config.baseBranch ?? (await ctx.defaultBranch())
+    },
+    baseBranchOffline() {
+      try {
+        if (ctx.config.baseBranch) return ctx.config.baseBranch
+      } catch {
+        // An unreadable .agit.json falls through to the remote's HEAD.
+      }
+      try {
+        return git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']).trim().replace(/^origin\//, '')
+      } catch {
+        return null
+      }
+    },
+
+    /** The repository's default branch, from GitHub. */
+    defaultBranch() {
+      return once('defaultBranch', async () => {
         const { owner, repo } = ctx.repo()
         const meta = await (await ctx.client()).api(`/repos/${owner}/${repo}`)
-        return meta.default_branch
+        return /** @type {string} */ (meta.default_branch)
       })
     },
 
@@ -128,10 +170,9 @@ export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env 
       })
     },
 
-    /** The maintainer grant as this process's session sees it. */
-    grant(session) {
-      const dir = ctx.gitCommonDir()
-      return readGrant({ path: grantPath(dir), ...(session !== undefined ? { session } : {}) })
+    /** The maintainer grant as `session` (default: this process's) sees it. */
+    grant(session = currentSession(env)) {
+      return readGrant({ path: grantPath(ctx.gitCommonDir()), session })
     },
     grantFiles() {
       const dir = ctx.gitCommonDir()
@@ -152,6 +193,75 @@ export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env 
 }
 
 /** @typedef {ReturnType<typeof resolveContext>} Context */
+
+/**
+ * The repository root containing `absPath`: the nearest ancestor holding a
+ * `.git` entry — a directory for a clone, a file for a linked worktree. So a
+ * file in ANY worktree, wherever the harness put it, is judged by its position
+ * in its own checkout. (The harness agit was ported from stripped `.claude/worktrees/<name>/`
+ * prefixes and was off for every session whose worktree lived elsewhere.)
+ * A walk rather than `git rev-parse`, because the path a hook is asked about
+ * may not exist yet.
+ *
+ * @param {string} absPath
+ * @returns {{ root: string, rel: string } | null}
+ */
+export function locate(absPath) {
+  const dir = resolve(absPath)
+  for (let d = dir; ; d = dirname(d)) {
+    if (existsSync(join(d, '.git'))) {
+      const rel = relative(d, dir).split(sep).join('/')
+      return rel.startsWith('..') ? null : { root: d, rel }
+    }
+    if (dirname(d) === d) return null
+  }
+}
+
+/**
+ * A resolver from paths a hook is asked about to `{ ctx, rel }` — the Context
+ * of the checkout each path sits in, and the path relative to it. Contexts are
+ * memoised per checkout for the life of the resolver (one hook call), so a
+ * command naming ten files in one repo reads its policy and grant once.
+ *
+ * @param {{ env?: NodeJS.ProcessEnv }} [opts]
+ * @returns {(path: string, cwd: string) => { ctx: Context, rel: string } | null}
+ */
+export function contextForPath({ env = process.env } = {}) {
+  const contexts = new Map()
+  return (path, cwd) => {
+    const loc = locate(isAbsolute(path) ? path : resolve(cwd, path))
+    if (!loc) return null
+    let ctx = contexts.get(loc.root)
+    if (!ctx) {
+      ctx = resolveContext({ cwd: loc.root, env })
+      contexts.set(loc.root, ctx)
+    }
+    return { ctx, rel: loc.rel }
+  }
+}
+
+/**
+ * The project config that governs `owner/repo` from `cwd` — for the
+ * credential helper, which git runs inside the repository it is fetching. It
+ * applies only when the checkout at `cwd` IS that repository, and it never
+ * throws: an unreadable config is no pin, and the helper falls back to the
+ * owner map like any other repo.
+ *
+ * @param {{ owner: string, repo: string, cwd?: string, env?: NodeJS.ProcessEnv }} input
+ * @returns {import('./config.mjs').ProjectConfig | null}
+ */
+export function projectFor({ owner, repo, cwd = process.cwd(), env = process.env }) {
+  try {
+    const ctx = resolveContext({ cwd, env })
+    if (!ctx.root) return null
+    const here = ctx.repo()
+    return here.owner.toLowerCase() === owner.toLowerCase() && here.repo.toLowerCase() === repo.toLowerCase()
+      ? ctx.config
+      : null
+  } catch {
+    return null
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Argument helpers shared by the verbs

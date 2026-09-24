@@ -28,7 +28,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { join } from 'node:path'
 import { CODEOWNERS_LOCATIONS, findCodeowners, ownersOf, parseCodeowners, patternToRegExp } from './codeowners.mjs'
 import { DEFAULTS, PROJECT_FILE, loadProjectConfig, merge } from './config.mjs'
 
@@ -110,27 +110,6 @@ export function normalise(path) {
 }
 
 /**
- * The repository root containing `absPath`: the nearest ancestor holding a
- * `.git` entry — a directory for a clone, a file for a linked worktree. So a
- * file in ANY worktree, wherever the harness put it, is judged by its position
- * in its own checkout. (The harness agit was ported from stripped `.claude/worktrees/<name>/`
- * prefixes and was off for every session whose worktree lived elsewhere.)
- *
- * @param {string} absPath
- * @returns {{ root: string, rel: string } | null}
- */
-export function locate(absPath) {
-  const dir = resolve(absPath)
-  for (let d = dir; ; d = dirname(d)) {
-    if (existsSync(join(d, '.git'))) {
-      const rel = relative(d, dir).split(sep).join('/')
-      return rel.startsWith('..') ? null : { root: d, rel }
-    }
-    if (dirname(d) === d) return null
-  }
-}
-
-/**
  * The policy of the checkout at `root`, reading CODEOWNERS and `.agit.json`
  * from its working tree. Used by the editor hooks, which judge the file as it
  * sits on disk. `agit publish` reads CODEOWNERS from the BASE instead — see
@@ -168,10 +147,4 @@ export function policyAtRef({ git, ref, root }) {
     config = loadProjectConfig(root)
   }
   return createPolicy({ config, codeowners: findCodeowners(show) })
-}
-
-/** Absolute or cwd-relative → `{ root, rel }`, for paths named in a hook payload. */
-export function resolveTarget(path, cwd) {
-  const abs = isAbsolute(path) ? path : resolve(cwd ?? process.cwd(), path)
-  return locate(abs)
 }
