@@ -157,7 +157,7 @@ export async function run(argv, deps = {}) {
   add(
     agitBin
       ? ok(`agit on PATH (${agitBin})`)
-      : fail('agit is not on PATH', 'the hooks and the credential helper call `agit`. Install it: npm install -g <this repo>, or npm link'),
+      : fail('agit is not on PATH', 'the hooks and the credential helper call `agit`. Install it: npm install -g @oakgreencc/agit'),
   )
 
   let ctx

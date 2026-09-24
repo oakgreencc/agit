@@ -5,9 +5,11 @@ Setup creates a GitHub App in a browser and stores its private key on this machi
 ## 1. Install the CLI (once per machine)
 
 ```
-npm install -g github:<owner>/agit      # or: git clone … && npm link
+npm install -g @oakgreencc/agit      # or: git clone … && npm link
 agit --version
 ```
+
+The skill ships separately: `npx skills add oakgreencc/agit -g` (or the Claude Code plugin from the same repo).
 
 `agit` must be on `PATH`: the Claude hooks and the git credential helper call it by name. Node ≥ 22, no other dependencies.
 

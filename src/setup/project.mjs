@@ -147,6 +147,11 @@ export async function setupProject(argv, deps = {}) {
     let meta
     let slug = null
     try {
+      slug = readAppCredentials({ owner, project: ctx.config, env: ctx.env }).slug
+    } catch {
+      slug = null
+    }
+    try {
       const client = await ctx.client()
       meta = await client.api(`/repos/${owner}/${repo}`)
     } catch (err) {
@@ -154,17 +159,12 @@ export async function setupProject(argv, deps = {}) {
       if (isNotFound(err)) {
         throw new Error(
           `the App is not installed on ${full} (GitHub answered 404).\n` +
-            'Install it on this repository — https://github.com/apps/<your-app>/installations/new — and run this again.',
+            `Install it on this repository — ${slug ? installUrl(slug) : 'https://github.com/apps/<your-app>/installations/new'} — and run this again.`,
         )
       }
       throw err
     }
     say(`✓ the App can reach ${full} (default branch: ${meta.default_branch})`)
-    try {
-      slug = readAppCredentials({ owner, project: ctx.config, env: ctx.env }).slug
-    } catch {
-      slug = null
-    }
 
     // --- .agit.json ------------------------------------------------------
     const projectPath = join(root, PROJECT_FILE)

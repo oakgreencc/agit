@@ -1,11 +1,16 @@
 ---
 name: agit
 description: Write to GitHub through agit, a GitHub App, instead of git push or gh. Use when committing, pushing, opening or merging a PR, commenting on an issue, reading CI logs, or when agit refuses a publish; and when setting up agit (App, credentials, repo bootstrap).
+allowed-tools: Bash(agit *), Bash(echo *)
 ---
 
 # agit
 
 Local git is **read-only** toward GitHub: fetch, diff, merge, stash, run tests. Every **write** — commit, branch, PR, merge, comment — goes through `agit`, which has GitHub create the commit through the API so it lands **Verified** as the App. `git push`, `gh`, and personal tokens are refused by hooks; reach for the matching verb below instead.
+
+Installed: !`agit --version 2>/dev/null || echo "NO — agit is not on PATH"`
+
+If that line shows anything but a version number, check with `agit --version`; if that fails too, agit is not installed and nothing below works yet: the hooks and the credential helper call `agit` by name. Ask the human to install it and run setup — see [Setup](#setup).
 
 Every verb takes `-C <dir>` and `--repo <owner/repo>` (default: the `origin` remote). `agit <verb> --help` is the source of truth for flags.
 

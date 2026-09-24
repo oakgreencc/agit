@@ -8,12 +8,13 @@ Let a coding agent work a GitHub project **as a GitHub App**, with the local `gi
 - **Maintainer mode.** A human lifts part of the protective layer with a scoped (`protected`, `no-verify`, `merge`), session-bound, expiring grant — `! agit maintainer grant "why" --scope protected`. agit stays in the loop; only that gate moves, for that session.
 - **Gates that come from incidents.** Scope (`--paths` or `--all`, never an implied sweep), payload (no `*.log`, no path growing by >512 KiB), displacement (a stale worktree silently reverting work), validated base (a green run about a different base), version floor.
 
-Zero dependencies, Node ≥ 22. A port and generalization of the `bot-commit` publish tool and agent harness from the SeKtor monorepo.
+Zero dependencies, Node ≥ 22.
 
 ## Quick start
 
 ```sh
-npm install -g github:<owner>/agit   # agit must be on PATH
+npm install -g @oakgreencc/agit      # the CLI; must be on PATH
+npx skills add oakgreencc/agit -g    # the agent skill (or: /plugin marketplace add oakgreencc/agit)
 agit setup app                       # creates the GitHub App from a manifest, stores its key
 cd your-repo && agit setup project   # .agit.json, CODEOWNERS, .claude/settings.json
 agit doctor

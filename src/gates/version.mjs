@@ -46,6 +46,6 @@ export function versionRefusal(minVersion, running = VERSION) {
     `refusing to run: this project's .agit.json requires agit >= ${minVersion}, and this is ${running}.\n` +
     'Its policy may rely on a gate this version does not have, and enforcing less than the\n' +
     'policy says, silently, is the failure this check exists for. Update agit:\n\n' +
-    '  npm install -g github:<owner>/agit   # or however this machine installed it'
+    '  npm install -g @oakgreencc/agit   # or however this machine installed it'
   )
 }

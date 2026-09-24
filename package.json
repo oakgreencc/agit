@@ -1,9 +1,26 @@
 {
-  "name": "agit",
+  "name": "@oakgreencc/agit",
   "version": "0.1.0",
   "description": "Let an agent work a GitHub project without the local git CLI's write path: Verified commits created by a GitHub App, the repo's git hooks run at the right moments, CODEOWNERS as the manifest of what needs a human, and a scoped maintainer mode for when one says yes.",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oakgreencc/agit.git"
+  },
+  "homepage": "https://github.com/oakgreencc/agit#readme",
+  "bugs": {
+    "url": "https://github.com/oakgreencc/agit/issues"
+  },
+  "keywords": [
+    "github",
+    "github-app",
+    "git",
+    "agent",
+    "claude-code",
+    "verified-commits",
+    "codeowners"
+  ],
   "bin": {
     "agit": "./bin/agit.mjs"
   },
@@ -15,9 +32,13 @@
     "docs/"
   ],
   "scripts": {
-    "test": "node --test 'test/*.test.mjs'"
+    "test": "node --test 'test/*.test.mjs'",
+    "prepublishOnly": "npm test"
   },
   "engines": {
     "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
