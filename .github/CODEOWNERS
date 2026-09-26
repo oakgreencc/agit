@@ -1,0 +1,12 @@
+# Paths a human must approve. agit reads this file as the manifest of
+# protected paths: agents cannot edit or publish them without a
+# maintainer grant, and with "Require review from Code Owners" on the
+# base branch's ruleset, GitHub will not merge them without the owner.
+#
+# Keep it short. List what changes what the gates catch, what an agent may
+# do, or what reaches production — not everything that is important.
+
+# The protection itself.
+/.github/CODEOWNERS  @jamesloosli
+/.agit.json  @jamesloosli
+/.claude/settings.json  @jamesloosli
