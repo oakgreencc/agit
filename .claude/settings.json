@@ -1,0 +1,74 @@
+{
+  "env": {
+    "GIT_CONFIG_COUNT": "6",
+    "GIT_CONFIG_KEY_0": "url.https://github.com/oakgreencc/.insteadOf",
+    "GIT_CONFIG_VALUE_0": "git@github.com:oakgreencc/",
+    "GIT_CONFIG_KEY_1": "credential.https://github.com.useHttpPath",
+    "GIT_CONFIG_VALUE_1": "true",
+    "GIT_CONFIG_KEY_2": "credential.https://github.com.helper",
+    "GIT_CONFIG_VALUE_2": "",
+    "GIT_CONFIG_KEY_3": "credential.https://github.com.helper",
+    "GIT_CONFIG_VALUE_3": "!agit credential",
+    "GIT_CONFIG_KEY_4": "commit.gpgsign",
+    "GIT_CONFIG_VALUE_4": "false",
+    "GIT_CONFIG_KEY_5": "tag.gpgsign",
+    "GIT_CONFIG_VALUE_5": "false"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agit hook guard-credentials",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "agit hook guard-pr-writes",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "agit hook guard-protected",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agit hook guard-protected",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "EnterWorktree",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agit hook sync-worktree",
+            "timeout": 60,
+            "statusMessage": "Syncing worktree to its base"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(agit *)",
+      "Bash(git fetch *)"
+    ],
+    "deny": [
+      "Bash(git push *)",
+      "Bash(gh *)"
+    ]
+  }
+}
