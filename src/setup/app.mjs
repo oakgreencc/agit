@@ -25,6 +25,8 @@
  *
  * Every question has a flag (`--name`, `--owner`, `--org`, `--yes`, …) so the
  * whole thing can run unattended — except the two clicks, which are the point.
+ * Run inside a repository, the owner defaults to its origin's, and whether
+ * that is a user or an organization is asked of GitHub, not the human.
  */
 
 import { spawn } from 'node:child_process'
@@ -33,7 +35,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { agitHome, loadUserConfig } from '../config.mjs'
-import { flag, has } from '../context.mjs'
+import { contextOptions } from '../cli/common.mjs'
+import { flag, has, resolveContext } from '../context.mjs'
 import { appDir, asApp, request } from '../github/app.mjs'
 import { appManifest, installUrl, newAppUrl } from './manifest.mjs'
 import { createPrompter } from './prompt.mjs'
@@ -211,7 +214,7 @@ const USAGE = `usage: agit setup app [--owner <user> | --org <org>] [--name <app
 
 /**
  * @param {string[]} argv
- * @param {{ fetch?: typeof globalThis.fetch, open?: (url: string) => void, prompt?: import('./prompt.mjs').Prompter, env?: NodeJS.ProcessEnv, timeoutMs?: number }} [deps]
+ * @param {{ fetch?: typeof globalThis.fetch, open?: (url: string) => void, prompt?: import('./prompt.mjs').Prompter, env?: NodeJS.ProcessEnv, timeoutMs?: number, repoOwner?: (argv: string[]) => string | null }} [deps]
  * @returns {Promise<{ slug: string, appId: string, owner: string | null, installations: any[] }>}
  */
 export async function setupApp(argv, deps = {}) {
@@ -224,11 +227,12 @@ export async function setupApp(argv, deps = {}) {
     open = openBrowser,
     env = process.env,
     prompt = createPrompter({ yes: has(argv, '--yes') }),
+    repoOwner = originOwner,
   } = deps
   try {
     const app = has(argv, '--manual')
       ? await manualApp(argv, { fetch, prompt, env })
-      : await manifestApp(argv, { fetch, open, prompt, env, timeoutMs: deps.timeoutMs })
+      : await manifestApp(argv, { fetch, open, prompt, env, timeoutMs: deps.timeoutMs, repoOwner })
 
     const keyPem = readFileSync(join(appDir(app.slug, env), 'private-key.pem'), 'utf8')
     let installations = []
@@ -250,11 +254,31 @@ export async function setupApp(argv, deps = {}) {
   }
 }
 
-async function manifestApp(argv, { fetch, open, prompt, env, timeoutMs }) {
+/**
+ * The owner of the repository setup runs in, from its `origin` remote — the
+ * account whose repositories the App is for, so nobody has to type it. Null
+ * outside a repository or without a GitHub origin.
+ *
+ * @param {string[]} argv
+ * @returns {string | null}
+ */
+export function originOwner(argv) {
+  try {
+    const ctx = resolveContext(contextOptions(argv))
+    return ctx.root ? ctx.repo().owner : null
+  } catch {
+    return null
+  }
+}
+
+async function manifestApp(argv, { fetch, open, prompt, env, timeoutMs, repoOwner }) {
   const org = flag(argv, '--org')
+  const fromOrigin = org || flag(argv, '--owner') ? null : repoOwner(argv)
+  if (fromOrigin) say(`Owner: ${fromOrigin}, from this repository's origin (--owner or --org to change).`)
   const owner =
     org ??
     flag(argv, '--owner') ??
+    fromOrigin ??
     (await prompt.ask('GitHub user or organization that will own the App', { flag: '--owner or --org' }))
   // An org's App is created from a different URL. Ask GitHub rather than the
   // human which one `owner` is (public endpoint; no credentials needed yet).

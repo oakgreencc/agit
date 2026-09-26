@@ -3,9 +3,9 @@
 agit's local layer (hooks, gates, maintainer mode) is a set of tripwires. An
 agent with a shell can step over any of them. What it can't step over is
 GitHub: an App permission it doesn't hold, or a ruleset it can't edit. This
-page covers those. `agit setup` does the App part for you. The rulesets need a
-human with admin rights, because the App deliberately can't touch them.
-`agit doctor` checks all of it.
+page covers those. `agit setup` does both for you: the App, and the base
+branch's ruleset — which it writes as *you*, through `gh`, because the App
+deliberately can't touch rulesets. `agit doctor` checks all of it.
 
 ## 1. The App
 
@@ -45,9 +45,20 @@ attributed to you.
 
 ## 2. The base-branch ruleset
 
-Go to Settings → Rules → New branch ruleset
-(`https://github.com/<owner>/<repo>/settings/rules`). Target the branch agent
-PRs land on (`baseBranch` in `.agit.json`).
+`agit setup project` handles this. It reads the rules in force on the base
+(`baseBranch` in `.agit.json`) as the App, and if any of the ones below are
+missing, it creates a ruleset named `agit: <base>` — or adds the missing rules
+to the one that exists — through `gh api`, as you. It only ever adds: other
+rulesets, and the rest of `agit: <base>`, are left as you set them.
+Repository admins may bypass it, through pull requests only (so a solo
+maintainer can merge their own PR); the App never can.
+
+Without `gh` logged in as a repository admin, setup writes the ruleset to
+`~/.config/agit/rulesets/<owner>-<repo>-<base>.json` instead: import it at
+Settings → Rules → New ruleset → **Import a ruleset**
+(`https://github.com/<owner>/<repo>/settings/rules`).
+
+What it contains, and why:
 
 - **Require a pull request before merging.**
 - **Require review from Code Owners.** This is what makes CODEOWNERS binding.
@@ -55,13 +66,14 @@ PRs land on (`baseBranch` in `.agit.json`).
   manifest of protected paths and refuses to edit or publish them without your
   grant. This rule is what stops a PR that touches them from merging without
   you, whatever happened locally.
-- **Require status checks to pass.** Name your CI job. If agents merge their
-  own PRs, CI is the acceptance gate. Set `requiredCheck` in `.agit.json` to
-  the same name so `agit pr merge` can stop the line when the base is red.
+- **Require status checks to pass** — once there is CI:
+  `agit setup project --required-check <job>`. If agents merge their own PRs,
+  CI is the acceptance gate, and `requiredCheck` in `.agit.json` lets
+  `agit pr merge` stop the line when the base is red.
 - **Require signed commits.** agit's commits are Verified. This keeps out
   anything pushed with the local git binary, which is unsigned and attributed
   to whoever `user.name` says.
-- **Block force pushes.**
+- **Block force pushes and deletion.**
 
 Don't add the App to the bypass list.
 

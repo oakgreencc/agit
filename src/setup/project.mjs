@@ -2,7 +2,8 @@
 /**
  * `agit setup project` — bootstrap one repository for agent work.
  *
- * Writes three files, each shown before it is written:
+ * Brings two things to the state agent work needs, detecting each first and
+ * changing only what is missing. Three files, each shown before it is written:
  *
  *   .agit.json              the project's policy (config.mjs): the base PRs
  *                           land on, what validates a tree, where the tracked
@@ -15,9 +16,10 @@
  *   .claude/settings.json   the credential helper, the Claude Code hooks and
  *                           the permissions (settings.mjs).
  *
- * Then it prints what only a human can do on GitHub — the rulesets that turn
- * CODEOWNERS from documentation into a boundary. The App cannot apply them: it
- * holds no Administration permission, on purpose.
+ * And the base branch's ruleset on GitHub (rulesets.mjs) — what turns
+ * CODEOWNERS from documentation into a boundary. The App detects it; the
+ * human's `gh` writes it, because the App holds no Administration permission,
+ * on purpose.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -29,6 +31,7 @@ import { flag, has, resolveContext } from '../context.mjs'
 import { NoAppError, isNotFound, readAppCredentials } from '../github/app.mjs'
 import { installUrl } from './manifest.mjs'
 import { createPrompter } from './prompt.mjs'
+import { ensureBaseRuleset, ghAdmin } from './rulesets.mjs'
 import { claudeHooks, envToPairs, gitConfigEnv, mergeSettings } from './settings.mjs'
 
 const say = (line = '') => console.log(line)
@@ -106,20 +109,14 @@ export function lineDiff(before, after) {
   return [...a.filter((l) => l.trim() && !inB.has(l)).map((l) => `- ${l}`), ...b.filter((l) => l.trim() && !inA.has(l)).map((l) => `+ ${l}`)]
 }
 
-/** The GitHub-side checklist: what makes CODEOWNERS a boundary. */
-export function githubChecklist({ owner, repo, base, requiredCheck, slug }) {
+/** What is left on GitHub after setup: optional, and the human's call. */
+export function githubChecklist({ owner, repo, requiredCheck, slug }) {
   const rules = `https://github.com/${owner}/${repo}/settings/rules`
   return [
-    'On GitHub (a human with admin rights; the App deliberately cannot):',
-    '',
-    `  ${rules}  → New branch ruleset, target: ${base}`,
-    '    [ ] Require a pull request before merging',
-    '    [ ] Require review from Code Owners        ← this is what makes CODEOWNERS binding',
-    `    [ ] Require status checks to pass${requiredCheck ? ` (${requiredCheck})` : ''}`,
-    '    [ ] Require signed commits                 ← agit commits are Verified; pushes from agents are not',
-    '    [ ] Block force pushes',
-    '  Optional: a second ruleset limiting what the App may create, e.g. branches `agent/**` only.',
-    `  Optional: Settings → General → Allow auto-merge, if agents will use \`agit pr merge --auto\`.`,
+    'Optional, on GitHub:',
+    ...(requiredCheck ? [] : ['  Once CI exists: agit setup project --required-check <job> adds it to the base ruleset.']),
+    `  A second ruleset limiting what the App may create, e.g. branches \`agent/**\` only: ${rules}`,
+    `  Settings → General → Allow auto-merge, if agents will use \`agit pr merge --auto\`.`,
     ...(slug ? ['', `  App installation (repositories it may touch): ${installUrl(slug)}`] : []),
     '',
     'Then check everything with: agit doctor',
@@ -132,7 +129,7 @@ const USAGE = `usage: agit setup project [--base <branch>] [--validate "<command
 
 /**
  * @param {string[]} argv
- * @param {{ prompt?: import('./prompt.mjs').Prompter, cwd?: string, env?: NodeJS.ProcessEnv }} [deps]
+ * @param {{ prompt?: import('./prompt.mjs').Prompter, cwd?: string, env?: NodeJS.ProcessEnv, admin?: ReturnType<typeof ghAdmin> }} [deps]
  */
 export async function setupProject(argv, deps = {}) {
   if (has(argv, '--help')) return say(USAGE)
@@ -145,6 +142,7 @@ export async function setupProject(argv, deps = {}) {
 
     // --- the App must reach this repo -----------------------------------
     let meta
+    let client
     let slug = null
     try {
       slug = readAppCredentials({ owner, project: ctx.config, env: ctx.env }).slug
@@ -152,7 +150,7 @@ export async function setupProject(argv, deps = {}) {
       slug = null
     }
     try {
-      const client = await ctx.client()
+      client = await ctx.client()
       meta = await client.api(`/repos/${owner}/${repo}`)
     } catch (err) {
       if (err instanceof NoAppError) throw new Error(`${err.message}\nCreate one first: agit setup app`)
@@ -206,14 +204,18 @@ export async function setupProject(argv, deps = {}) {
     // --- CODEOWNERS ------------------------------------------------------
     const found = findCodeowners((p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), 'utf8') : null))
     const isOrg = meta.owner?.type === 'Organization'
-    const handle =
-      flag(argv, '--codeowner') ??
-      (await prompt.ask(
-        isOrg ? 'Code owner for protected paths (@user or @org/team)' : 'Code owner for protected paths',
-        { default: isOrg ? null : `@${owner}`, flag: '--codeowner' },
-      ))
     const coPath = found.path ?? CODEOWNERS_LOCATIONS[0]
-    const missing = missingCodeownersLines({ text: found.text, codeownersPath: coPath, hooksDir, owner: handle })
+    // Only ask who owns the protection when some of it is unowned: a re-run
+    // over a complete CODEOWNERS needs no answer.
+    const unowned = missingCodeownersLines({ text: found.text, codeownersPath: coPath, hooksDir, owner: '' }).length > 0
+    const handle = !unowned
+      ? ''
+      : (flag(argv, '--codeowner') ??
+        (await prompt.ask(
+          isOrg ? 'Code owner for protected paths (@user or @org/team)' : 'Code owner for protected paths',
+          { default: isOrg ? null : `@${owner}`, flag: '--codeowner' },
+        )))
+    const missing = unowned ? missingCodeownersLines({ text: found.text, codeownersPath: coPath, hooksDir, owner: handle }) : []
     if (missing.length) {
       const next = found.path
         ? `${found.text.replace(/\n*$/, '\n')}\n# The protection itself (added by agit setup).\n${missing.join('\n')}\n`
@@ -235,8 +237,28 @@ export async function setupProject(argv, deps = {}) {
       await writeWithConfirm(prompt, settingsPath, `${JSON.stringify(next, null, 2)}\n`, root)
     }
 
+    // --- the base branch's ruleset, on GitHub ---------------------------
+    let effective = null
+    try {
+      effective = await client.api(`/repos/${owner}/${repo}/rules/branches/${encodeURIComponent(baseBranch)}`)
+    } catch (err) {
+      say(`! could not read the rules on ${baseBranch}: ${String(/** @type {Error} */ (err).message).slice(0, 200)}`)
+    }
+    if (effective)
+      await ensureBaseRuleset({
+        owner,
+        repo,
+        base: baseBranch,
+        requiredCheck: requiredCheck || null,
+        effective,
+        admin: deps.admin ?? ghAdmin(),
+        prompt,
+        say,
+        env: ctx.env,
+      })
+
     say('')
-    say(githubChecklist({ owner, repo, base: baseBranch, requiredCheck: requiredCheck || null, slug }))
+    say(githubChecklist({ owner, repo, requiredCheck: requiredCheck || null, slug }))
   } finally {
     prompt.close()
   }

@@ -26,25 +26,61 @@ import { clientFor } from './github/app.mjs'
 import { currentSession, grantPath, logPath, readGrant } from './maintainer.mjs'
 import { policyFrom, readAtRef, readAtRoot } from './protected.mjs'
 
+/** The git subcommands agit runs that reach the remote. Never `push`: agit does not push. */
+const REMOTE_READS = new Set(['fetch', 'ls-remote'])
+
+/**
+ * How agit's own reads from GitHub authenticate: as the App, always — never
+ * through whatever the human's git would use. The session's environment (the
+ * block `agit setup project` writes) is not relied on; a session that never
+ * loaded it must not fall through to the human's SSH key or keychain.
+ *
+ *   -c           GitHub SSH remotes rewritten to HTTPS; the credential helper
+ *                list reset (the empty value), then `agit credential` alone.
+ *   env          SSH made to fail outright and terminal prompts off, so if
+ *                anything still reaches for the human it fails at once
+ *                instead of raising a biometric prompt.
+ *
+ * @param {string[]} args
+ * @returns {{ args: string[], env: Record<string, string> }}
+ */
+export function remoteAsApp(args) {
+  if (!REMOTE_READS.has(args[0])) return { args, env: {} }
+  const config = [
+    'url.https://github.com/.insteadOf=git@github.com:',
+    'url.https://github.com/.insteadOf=ssh://git@github.com/',
+    'credential.https://github.com.useHttpPath=true',
+    'credential.https://github.com.helper=',
+    'credential.https://github.com.helper=!agit credential',
+  ]
+  return {
+    args: [...config.flatMap((c) => ['-c', c]), ...args],
+    env: { GIT_SSH_COMMAND: 'false', GIT_TERMINAL_PROMPT: '0' },
+  }
+}
+
 /**
  * git in a directory. stderr is piped rather than inherited: several calls in
  * the publish path ask git questions it answers on stderr with a "fatal:" that
  * is not one (a path absent from a ref), and inheriting would print failures
  * that are not failures. It stays in `err.message` for callers that read it.
+ * Calls that reach the remote go as the App (`remoteAsApp`).
  *
  * @param {string} dir
  * @returns {(args: string[], opts?: { env?: Record<string, string>, encoding?: 'utf8' | 'buffer', input?: string }) => any}
  */
 export const gitIn =
   (dir) =>
-  (args, { env, encoding = 'utf8', input } = {}) =>
-    execFileSync('git', ['-C', dir, ...args], {
+  (args, { env, encoding = 'utf8', input } = {}) => {
+    const app = remoteAsApp(args)
+    return execFileSync('git', ['-C', dir, ...app.args], {
       encoding: encoding === 'buffer' ? null : encoding,
       maxBuffer: 100 * 1024 * 1024,
       stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       input,
-      env: env ? { ...process.env, ...env } : process.env,
+      env: { ...process.env, ...env, ...app.env },
     })
+  }
 
 /** Progress on stderr, so stdout stays parseable for `api`/`graphql`. */
 export const progress = (line) => console.error(line)
