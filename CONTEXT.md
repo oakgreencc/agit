@@ -66,5 +66,5 @@ The one answer to "where am I": the checkout, its project config, repo, base bra
 _Avoid_: environment, workspace
 
 **Hook**:
-A Claude Code entry point agit answers: a guard (denies a tool call) or a notice (adds context after one).
+A Claude Code entry point agit answers: a guard (denies a tool call) or a notice (adds context after one, or at session start).
 _Avoid_: git hook (those are the repository's own, which agit runs during a Publish)
