@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { awaitManifestCode, saveApp, setupApp, waitForInstallation } from '../src/setup/app.mjs'
-import { scriptedPrompter } from '../src/setup/prompt.mjs'
+import { createPrompter, scriptedPrompter } from '../src/setup/prompt.mjs'
 
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
 const pem = privateKey.export({ type: 'pkcs1', format: 'pem' }).toString()
@@ -151,4 +151,62 @@ test('setupApp --manual: validates the pair with GET /app before storing it', as
     console.log = origLog
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+/**
+ * Run the manifest flow with no --owner/--org and no terminal: the owner must
+ * come from `repoOwner` (the origin remote), and the page must post to the
+ * form GitHub's /users/<owner> type calls for.
+ */
+async function flowFromOrigin({ login, type, form }) {
+  const home = mkdtempSync(join(tmpdir(), 'agit-home-'))
+  const fakeFetch = /** @type {any} */ (async (url) => {
+    const u = String(url)
+    if (u.endsWith(`/users/${login}`)) return json({ type })
+    if (u.endsWith('/app-manifests/c0de/conversions'))
+      return json({ id: 7, slug: `${login}-agents`, pem, owner: { login } })
+    throw new Error(`unexpected ${u}`)
+  })
+  const origLog = console.log
+  console.log = () => {}
+  try {
+    // No --yes: without a terminal the App name takes its default anyway.
+    const out = await setupApp(['--no-wait'], {
+      fetch: fakeFetch,
+      env: { ...process.env, AGIT_HOME: home },
+      prompt: createPrompter({ interactive: false }),
+      repoOwner: () => login,
+      open: (url) => {
+        if (!url.startsWith('http://127.0.0.1')) return
+        ;(async () => {
+          const page = await (await fetch(url)).text()
+          assert.match(page, form)
+          const state = /state=([0-9a-f]+)/.exec(page)?.[1]
+          await fetch(`${url}/callback?code=c0de&state=${state}`)
+        })()
+      },
+    })
+    assert.equal(out.owner, login)
+    assert.equal(JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')).owners[login], `${login}-agents`)
+  } finally {
+    console.log = origLog
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
+test('setupApp: no --owner, an organization origin — owner and org form come from the repo', () =>
+  flowFromOrigin({ login: 'acme', type: 'Organization', form: /organizations\/acme\/settings\/apps\/new\?state=/ }))
+
+test('setupApp: no --owner, a personal origin — the user form', () =>
+  flowFromOrigin({ login: 'solo', type: 'User', form: /github\.com\/settings\/apps\/new\?state=/ }))
+
+test('setupApp: no --owner and no origin, no terminal — refuses naming the flags', async () => {
+  await assert.rejects(
+    setupApp(['--no-wait'], {
+      fetch: /** @type {any} */ (async () => assert.fail('no request before an owner is known')),
+      prompt: createPrompter({ interactive: false }),
+      repoOwner: () => null,
+    }),
+    /Pass --owner or --org/,
+  )
 })
