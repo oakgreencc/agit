@@ -23,14 +23,17 @@ test('permissionFindings: write path required; withheld permissions warned', () 
   assert.match(render(bad), /✗ App permission contents: read/)
 })
 
-test('rulesFindings: code owner review, signatures, status checks', () => {
-  assert.deepEqual(levels(rulesFindings([], 'main')), ['warn', 'warn', 'warn'])
+test('rulesFindings: code owner review, signatures, force pushes, status checks', () => {
+  const none = rulesFindings([], 'main')
+  assert.deepEqual(levels(none), ['warn', 'warn', 'warn', 'warn'])
+  assert.match(render(none), /Run: agit setup project/)
   const good = [
     { type: 'pull_request', parameters: { require_code_owner_review: true } },
     { type: 'required_signatures' },
+    { type: 'non_fast_forward' },
     { type: 'required_status_checks', parameters: {} },
   ]
-  assert.deepEqual(levels(rulesFindings(good, 'main')), ['ok', 'ok', 'ok'])
+  assert.deepEqual(levels(rulesFindings(good, 'main')), ['ok', 'ok', 'ok', 'ok'])
   const noOwners = rulesFindings([{ type: 'pull_request', parameters: { require_code_owner_review: false } }], 'main')
   assert.match(noOwners[0].label, /code owner review not required/)
 })
@@ -71,9 +74,10 @@ test('missingCodeownersLines: only what is not already owned, hooks dir included
 test('lineDiff and the checklist', () => {
   assert.deepEqual(lineDiff('a\nb\n', 'a\nc\n'), ['- b', '+ c'])
   assert.deepEqual(lineDiff(null, 'x\n'), ['+ x'])
-  const c = githubChecklist({ owner: 'o', repo: 'r', base: 'main', requiredCheck: 'ci', slug: 's' })
+  const c = githubChecklist({ owner: 'o', repo: 'r', requiredCheck: 'ci', slug: 's' })
   assert.match(c, /https:\/\/github.com\/o\/r\/settings\/rules/)
-  assert.match(c, /Require review from Code Owners/)
-  assert.match(c, /\(ci\)/)
+  assert.doesNotMatch(c, /Require review from Code Owners/, 'setup applies the base ruleset; the checklist is only what is optional')
+  assert.doesNotMatch(c, /--required-check/)
   assert.match(c, /apps\/s\/installations\/new/)
+  assert.match(githubChecklist({ owner: 'o', repo: 'r', requiredCheck: null, slug: null }), /--required-check <job>/)
 })

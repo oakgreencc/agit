@@ -80,20 +80,29 @@ export function permissionFindings(perms = {}) {
 export function rulesFindings(rules, base) {
   const by = (t) => (rules ?? []).filter((r) => r?.type === t)
   const out = []
+  const fix = 'Run: agit setup project'
   const pr = by('pull_request')
-  if (!pr.length) out.push(warn(`${base}: no "require a pull request" rule`, 'anything with write access can land on it directly'))
+  if (!pr.length) out.push(warn(`${base}: no "require a pull request" rule`, `anything with write access can land on it directly. ${fix}`))
   else if (!pr.some((r) => r.parameters?.require_code_owner_review))
-    out.push(warn(`${base}: code owner review not required`, 'CODEOWNERS is documentation until "Require review from Code Owners" is on'))
+    out.push(warn(`${base}: code owner review not required`, `CODEOWNERS is documentation until "Require review from Code Owners" is on. ${fix}`))
   else out.push(ok(`${base}: pull requests with code owner review required`))
   out.push(
     by('required_signatures').length
       ? ok(`${base}: signed commits required`)
-      : warn(`${base}: signed commits not required`, 'agit commits are Verified; requiring it keeps unsigned pushes out'),
+      : warn(`${base}: signed commits not required`, `agit commits are Verified; requiring it keeps unsigned pushes out. ${fix}`),
+  )
+  out.push(
+    by('non_fast_forward').length
+      ? ok(`${base}: force pushes blocked`)
+      : warn(`${base}: force pushes allowed`, `a force push can rewrite what was reviewed. ${fix}`),
   )
   out.push(
     by('required_status_checks').length
       ? ok(`${base}: required status checks`)
-      : warn(`${base}: no required status checks`, 'CI is the acceptance gate; nothing makes it required'),
+      : warn(
+          `${base}: no required status checks`,
+          'CI is the acceptance gate; nothing makes it required. Run: agit setup project --required-check <job>',
+        ),
   )
   return out
 }
