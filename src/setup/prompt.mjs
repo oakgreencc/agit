@@ -3,10 +3,11 @@
  * Questions for the human running setup — and a refusal, not a hang, when
  * there is nobody to answer.
  *
- * Every question has a flag. Without a TTY (an agent's Bash call, CI) a
- * question with a default takes it under `--yes`, and one without a default
- * fails naming the flag that answers it, so an unattended run never blocks on
- * stdin that will never come.
+ * Every question has a flag. Without a TTY (an agent's Bash call, a `!`
+ * command, CI) there is nobody to ask, so it runs as if `--yes` were given: a
+ * question with a default takes it, a confirmation is a yes, and a question
+ * without a default fails naming the flag that answers it — an unattended run
+ * never blocks on stdin that will never come.
  */
 
 import { createInterface } from 'node:readline/promises'
@@ -38,22 +39,21 @@ export function createPrompter({
   const unanswerable = (question, flag) =>
     new Error(`setup needs an answer to "${question}" and has no terminal to ask on.${flag ? ` Pass ${flag}.` : ''}`)
 
+  // Nobody to ask is the same as being told to take the defaults.
+  const unattended = yes || !interactive
+
   return {
     async ask(question, { default: def = null, flag } = {}) {
-      if (yes && def !== null) return def
-      if (!interactive) {
-        if (def !== null && yes) return def
-        throw unanswerable(question, flag)
-      }
+      if (unattended && def !== null) return def
+      if (!interactive) throw unanswerable(question, flag)
       for (;;) {
         const got = await line(`${question}${def ? ` [${def}]` : ''}: `)
         if (got) return got
         if (def !== null) return def
       }
     },
-    async confirm(question, { default: def = true, flag } = {}) {
-      if (yes) return true
-      if (!interactive) throw unanswerable(question, flag ?? '--yes')
+    async confirm(question, { default: def = true } = {}) {
+      if (unattended) return true
       const got = (await line(`${question} ${def ? '[Y/n]' : '[y/N]'} `)).toLowerCase()
       if (!got) return def
       return got.startsWith('y')
