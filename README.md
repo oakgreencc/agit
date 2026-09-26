@@ -15,8 +15,8 @@ Zero dependencies, Node ≥ 22.
 ```sh
 npm install -g @oakgreencc/agit      # the CLI; must be on PATH
 npx skills add oakgreencc/agit -g    # the agent skill (or: /plugin marketplace add oakgreencc/agit)
-agit setup app                       # creates the GitHub App from a manifest, stores its key
-cd your-repo && agit setup project   # .agit.json, CODEOWNERS, .claude/settings.json
+agit setup app                       # in a repo: creates the GitHub App for origin's owner, stores its key
+cd your-repo && agit setup project   # .agit.json, CODEOWNERS, .claude/settings.json, base-branch ruleset
 agit doctor
 ```
 

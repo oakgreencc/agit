@@ -15,25 +15,29 @@ The skill ships separately: `npx skills add oakgreencc/agit -g` (or the Claude C
 
 ## 2. Create the App (once per GitHub owner)
 
+Run it from inside the repository — the owner comes from its `origin` remote, and whether that is a personal account or an organization is asked of GitHub. Don't guess `--owner`/`--org`; pass one only to create the App for a *different* account than origin's.
+
 ```
-! agit setup app                  # --org <org> for an organization; --manual to register an existing App
+! agit setup                      # App if this owner has none, then step 3 — one command
+! agit setup app                  # just the App; --manual to register an existing App
 ```
+
+A `!` command has no terminal, so setup runs as if `--yes` were given: every question takes its default (e.g. the App name `<owner>-agents`; `--name` to choose another) and file writes are confirmed. A question with no default — the owner, outside a repository — makes it exit naming the flag that answers it.
 
 Opens GitHub's "create App from manifest" page with the permissions pre-filled (contents, pull requests, issues: write; actions, checks, statuses: read; no workflows, no administration). After creation it saves the key to `~/.config/agit/apps/<slug>/`, then opens the install page — install it on the repositories agents should work in.
 
 ## 3. Bootstrap the repository (once per repo)
 
 ```
-! agit setup project
+! agit setup project              # already done if step 2 ran bare `agit setup`
 ```
 
-Writes `.agit.json` (base branch, validation command, hooks path, merge policy), seeds or extends CODEOWNERS so the policy files are owned, and merges into `.claude/settings.json`: the git env block (HTTPS rewrite + `agit credential` helper + local signing off), the agit hooks, and permissions. Review the diff it shows, then commit those files the normal human way.
+Checks each piece and changes only what is missing, so it is safe to re-run:
 
-## 4. Turn on the GitHub side
+- **In the repo:** writes `.agit.json` (base branch, validation command, hooks path, merge policy), seeds or extends CODEOWNERS so the policy files are owned, and merges into `.claude/settings.json`: the git env block (HTTPS rewrite + `agit credential` helper + local signing off), the agit hooks, and permissions. Review the diff it shows, then commit those files the normal human way.
+- **On GitHub:** makes the base branch require a PR with **review from Code Owners** (what makes CODEOWNERS a boundary rather than a tripwire), signed commits, and no force pushes or deletion — creating or extending the `agit: <base>` ruleset through `gh`, as the human, since the App cannot. Admins may bypass through PRs. Without `gh` as an admin it leaves a JSON file to import at Settings → Rules → Import a ruleset. Details: `docs/github-setup.md` in the agit repo.
 
-`agit setup project` prints the checklist and the rulesets URL. The load-bearing one: on the base branch, **require review from Code Owners** — that is what makes CODEOWNERS a boundary rather than a tripwire. Details and the rest: `docs/github-setup.md` in the agit repo.
-
-## 5. Check
+## 4. Check
 
 ```
 agit doctor
