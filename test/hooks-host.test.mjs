@@ -21,7 +21,7 @@ const bash = (command, extra = {}) => JSON.stringify({ tool_name: 'Bash', tool_i
 test('host: every hook module has the shape the host runs', async () => {
   for (const [name, load] of Object.entries(HOOKS)) {
     const mod = await load()
-    assert.ok(['PreToolUse', 'PostToolUse'].includes(mod.event), name)
+    assert.ok(['PreToolUse', 'PostToolUse', 'SessionStart'].includes(mod.event), name)
     assert.equal(typeof mod.decide, 'function', name)
   }
 })

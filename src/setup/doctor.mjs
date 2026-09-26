@@ -27,6 +27,7 @@ import { findHook, hooksDir } from '../git-hooks.mjs'
 import { asApp, readAppCredentials } from '../github/app.mjs'
 import { describe } from '../maintainer.mjs'
 import { SELF_PROTECTED } from '../protected.mjs'
+import { readRawGit, sessionFindings } from '../session-env.mjs'
 import { WITHHELD_PERMISSIONS } from './manifest.mjs'
 import { missingFromSettings } from './settings.mjs'
 
@@ -135,6 +136,25 @@ export function codeownersFindings(codeowners, unsupported = []) {
   }
   for (const u of unsupported) out.push(warn(`CODEOWNERS ${u}`))
   return out
+}
+
+/**
+ * What raw git in the process running doctor would authenticate as
+ * (session-env.mjs). Judged only inside a Claude Code session: in the human's
+ * own shell, raw git is theirs, and the answer is reported, not graded.
+ *
+ * @param {Parameters<typeof sessionFindings>[0] & { claude: boolean }} input
+ * @returns {Finding[]}
+ */
+export function processFindings({ claude, ...input }) {
+  const found = sessionFindings(input)
+  if (claude) return found.map((f) => ({ ...f, label: `this session: ${f.label}` }))
+  return [
+    ok(
+      `this shell (not a Claude Code session): ${found[0].label}`,
+      "raw git here is the human's own; agent sessions are checked at start by `agit hook session-check`",
+    ),
+  ]
 }
 
 /** @param {Finding[]} findings */
@@ -265,15 +285,28 @@ export async function run(argv, deps = {}) {
 
   // --- Claude settings ------------------------------------------------------
   const settingsPath = join(ctx.root, '.claude', 'settings.json')
+  let settingsEnv = null
   if (!existsSync(settingsPath)) add(warn('no .claude/settings.json', 'Claude Code sessions get no hooks or credential helper. Run: agit setup project'))
   else {
     try {
-      const missing = missingFromSettings(JSON.parse(readFileSync(settingsPath, 'utf8')))
+      const settings = JSON.parse(readFileSync(settingsPath, 'utf8'))
+      settingsEnv = settings?.env ?? null
+      const missing = missingFromSettings(settings)
       if (missing.length) for (const m of missing) add(warn(`.claude/settings.json lacks ${m}`))
       else add(ok('.claude/settings.json wires the credential helper and the agit hooks'))
     } catch (err) {
       add(fail('.claude/settings.json', /** @type {Error} */ (err).message))
     }
+  }
+
+  // --- this process ---------------------------------------------------------
+  // The files above say what a session WOULD get; this is what the one running
+  // doctor did get, which is loaded once at session start.
+  try {
+    const { url, helpers } = readRawGit({ cwd: ctx.root, env: ctx.env })
+    if (url) add(...processFindings({ url, helpers, processEnv: ctx.env, settingsEnv, claude: ctx.env.CLAUDECODE === '1' }))
+  } catch (err) {
+    add(warn('could not ask git what raw `git fetch` would authenticate as', /** @type {Error} */ (err).message))
   }
 
   // --- maintainer mode ------------------------------------------------------
