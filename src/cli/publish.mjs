@@ -33,6 +33,7 @@ import { hookRunner } from '../git-hooks.mjs'
 import { allows, grantAdvice } from '../maintainer.mjs'
 import { judgeCandidate } from '../publish/plan.mjs'
 import { advance, dirtyPaths, publishMerge, publishWorktree, resolveBranch } from '../publish/publish.mjs'
+import { localOnly, verdict } from '../status.mjs'
 import { COMMON_VALUE_FLAGS, contextFrom } from './common.mjs'
 
 export const PUBLISH_USAGE =
@@ -320,7 +321,27 @@ export async function runPublish(argv) {
     git(['fetch', 'origin', branch])
     reportAdvance(advance({ git, target: out.commit.sha }), branch)
   }
+  await reportLocalOnly({ git, client, owner, repo, base, branch, argv })
   return 0
+}
+
+/**
+ * The last line of a publish: what the worktree still holds that GitHub does
+ * not. A worktree tool counting commits since the session began will call
+ * published work "discarded" (#5); this is the answer to check it against.
+ * Advice, so a failure to find out never fails the publish. Under
+ * --no-advance the published paths are still dirty against the old HEAD, so
+ * the line would be wrong: skipped.
+ *
+ * @param {Parameters<typeof localOnly>[0] & { argv: string[] }} input
+ */
+async function reportLocalOnly({ argv, ...input }) {
+  if (has(argv, '--no-advance')) return
+  try {
+    console.log(verdict(await localOnly(input)))
+  } catch (e) {
+    console.log(`could not check what is local only: ${/** @type {Error} */ (e)?.message ?? e} (agit status)`)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +402,7 @@ export async function runMerge(argv) {
     git(['fetch', 'origin', branch])
     reportAdvance(advance({ git, target: out.commit.sha }), branch)
   }
+  await reportLocalOnly({ git, client, owner, repo, base, branch, argv })
   return 0
 }
 
