@@ -36,3 +36,15 @@ That is why CODEOWNERS is the manifest: the tripwire and the boundary read the s
 | `hooks/sync-worktree-base.mjs` | `src/hooks/sync-worktree.mjs` | base from config |
 | `.githooks/*` never ran for publishes | `src/git-hooks.mjs` | agit runs them |
 | `release.mjs`, `backport*.mjs` | — | CI-specific; not ported |
+
+### Second sync (SeKtor `8266359e..e875e6a5`, 2026-09-30)
+
+| SeKtor | agit | Change |
+|---|---|---|
+| `code-owner-approval.mjs` (#1801, stale rule) | `src/code-owner-approval.mjs`, `agit pr merge` | owners from agit's CODEOWNERS parser (wildcards work); stale basis names the configured base |
+| `pull-request.mjs` raw-write guard (#1845) | `src/raw-merge.mjs`, `agit api`/`graphql` | refuses and points at `agit pr merge` instead of re-judging |
+| `primitives/ci.mjs`, `develop.mjs` `RUN_FAILED` | `src/github/checks.mjs`, `agit ci wait`, `baseHealth` | only a real failure is red, on the base too |
+| `primitives/issue.mjs` (#1842, #1844) | `src/github/issues.mjs`, `agit issue` | no Broker or label taxonomy; `resolve/patch/claim` are `close/edit/assign` |
+| `primitives/verb-drift.mjs` (#1850) | `src/verb-drift.mjs`, `src/cli/verbs.mjs` | sweeps the skill, README and docs/ |
+| Broker, Ledger, tracker-rules, `--unbrokered`, `develop`/`search`/`pr count` verbs, sync-central, Ready grants | — | SeKtor's tracker, daemon and fleet; not ported |
+

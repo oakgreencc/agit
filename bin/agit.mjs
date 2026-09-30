@@ -24,6 +24,7 @@
 import { PublishError } from '../src/errors.mjs'
 import { VERSION } from '../src/gates/version.mjs'
 import { explain } from '../src/cli/explain.mjs'
+import { VERBS } from '../src/cli/verbs.mjs'
 
 const HELP = `agit ${VERSION} — work a GitHub project as a GitHub App
 
@@ -56,25 +57,6 @@ Setup:
 Common flags: -C <dir> (run as if in <dir>), --repo <owner/repo>.
 Run \`agit <verb> --help\` for a verb's flags. Docs: skills/agit/SKILL.md.`
 
-/** verb → module exporting `run(argv)`. Imported lazily: the credential helper must start fast. */
-const VERBS = {
-  publish: () => import('../src/cli/publish.mjs').then((m) => m.runPublish),
-  merge: () => import('../src/cli/publish.mjs').then((m) => m.runMerge),
-  advance: () => import('../src/cli/publish.mjs').then((m) => m.runAdvance),
-  api: () => import('../src/cli/api.mjs').then((m) => m.runApi),
-  graphql: () => import('../src/cli/api.mjs').then((m) => m.runGraphql),
-  jobs: () => import('../src/cli/api.mjs').then((m) => m.runJobs),
-  credential: () => import('../src/cli/credential.mjs').then((m) => m.run),
-  validate: () => import('../src/cli/validate.mjs').then((m) => m.run),
-  protected: () => import('../src/cli/protected.mjs').then((m) => m.run),
-  maintainer: () => import('../src/cli/maintainer.mjs').then((m) => m.run),
-  pr: () => import('../src/cli/pr.mjs').then((m) => m.run),
-  issue: () => import('../src/cli/issue.mjs').then((m) => m.run),
-  ci: () => import('../src/cli/ci.mjs').then((m) => m.run),
-  hook: () => import('../src/hooks/index.mjs').then((m) => m.run),
-  setup: () => import('../src/setup/index.mjs').then((m) => m.run),
-  doctor: () => import('../src/setup/doctor.mjs').then((m) => m.run),
-}
 
 const [verb, ...argv] = process.argv.slice(2)
 
