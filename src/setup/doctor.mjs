@@ -25,7 +25,7 @@ import { contextOptions } from '../cli/common.mjs'
 import { has, resolveContext } from '../context.mjs'
 import { findHook, hooksDir } from '../git-hooks.mjs'
 import { asApp, readAppCredentials } from '../github/app.mjs'
-import { describe } from '../maintainer.mjs'
+import { describe, describeAll } from '../maintainer.mjs'
 import { SELF_PROTECTED } from '../protected.mjs'
 import { WITHHELD_PERMISSIONS } from './manifest.mjs'
 import { missingFromSettings } from './settings.mjs'
@@ -278,7 +278,11 @@ export async function run(argv, deps = {}) {
 
   // --- maintainer mode ------------------------------------------------------
   try {
-    add(ok(describe(ctx.grant())))
+    const view = ctx.grant()
+    add(ok(describe(view)))
+    // A mismatch already names every grantee; otherwise list other sessions' grants.
+    const live = view.state === 'mismatch' ? [] : ctx.liveGrants()
+    if (live.length) add(ok(describeAll(live)))
   } catch {
     // no git dir: nothing to report
   }

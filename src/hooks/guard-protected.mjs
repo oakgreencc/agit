@@ -51,7 +51,7 @@
  *   - run `agit maintainer grant` — a grant the agent issues itself is not a
  *     human's decision. The human types it with Claude Code's `!` prefix,
  *     which is not a tool call and never reaches this hook.
- *   - write into `.git/agit/` — the grant file and its log live there.
+ *   - write into `.git/agit/` — the grants and their log live there.
  *   - write an `impossible` path — the App cannot, so no grant can help.
  *
  * WHERE A FILE IS. Each path is resolved against the event's `cwd` and judged
@@ -211,7 +211,7 @@ export function grantsItself(command) {
   })
 }
 
-/** Inside a clone's `.git/agit/` — the grant file and its log. */
+/** Inside a clone's `.git/agit/` — the grants and their log. */
 const AGIT_STATE = /(?:^|\/)\.git\/agit(?:\/|$)/
 export const isAgitState = (path) => AGIT_STATE.test(String(path).replace(/\\/g, '/'))
 
@@ -232,7 +232,7 @@ function impossibleReason(hit, how = '') {
 }
 
 const STATE_REASON =
-  "`.git/agit/` holds the maintainer grant and its log. Only a human writes there, through\n" +
+  "`.git/agit/` holds the maintainer grants and their log. Only a human writes there, through\n" +
   '`agit maintainer grant` — a grant an agent writes for itself is not a decision anyone made.'
 
 /**

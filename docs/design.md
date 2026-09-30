@@ -16,7 +16,7 @@ That is why CODEOWNERS is the manifest: the tripwire and the boundary read the s
 | Protected paths | CODEOWNERS (tracked, protected) | GitHub enforces it too |
 | App identity + key | `~/.config/agit/apps/<slug>/` (0600) | machine, never repo |
 | Token cache | `~/.config/agit/cache/` (0600) | the credential helper runs on every fetch |
-| Maintainer grant + log | `<git-common-dir>/agit/` | untracked, shared by worktrees of a clone |
+| Maintainer grants (`maintainer/<session>.json`) + log | `<git-common-dir>/agit/` | untracked, shared by worktrees of a clone |
 | Validation receipt | `<git-dir>/agit/validated-base.json` | per worktree, untracked |
 
 ## Port map from SeKtor
@@ -29,7 +29,7 @@ That is why CODEOWNERS is the manifest: the tripwire and the boundary read the s
 | `publish-freshness` (vendored-copy check) | `src/gates/version.mjs` | agit is installed, not vendored: a `minVersion` floor replaces it |
 | `packages/ci/src/validated-base.mjs` | `src/gates/validated-base.mjs` + `agit validate` | receipt moves into the git dir; any validation command |
 | `packages/agent-env/src/control-paths.mjs` | `src/codeowners.mjs`, `src/protected.mjs` | the hand-kept list and its drift check are gone: CODEOWNERS *is* the list |
-| `maintainer-mode.mjs` | `src/maintainer.mjs`, `agit maintainer` | scopes; grant in `.git/agit/`; agent self-grant refused by the guard hook |
+| `maintainer-mode.mjs` | `src/maintainer.mjs`, `agit maintainer` | scopes; one grant per session in `.git/agit/`; agent self-grant refused by the guard hook |
 | `hooks/block-agent-credentials.mjs` | `src/hooks/guard-credentials.mjs` | generic owners and guidance |
 | `hooks/guard-control-files.mjs` | `src/hooks/guard-protected.mjs` | repo located from the file path, so any worktree layout works |
 | `hooks/guard-pr-writes.mjs` | `src/hooks/guard-pr-writes.mjs` + `agit pr merge` | policy moves into the verb; the hook only routes raw merges to it |

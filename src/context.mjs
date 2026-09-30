@@ -23,7 +23,7 @@ import { existsSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { loadProjectConfig, parseRemote } from './config.mjs'
 import { clientFor } from './github/app.mjs'
-import { currentSession, grantPath, logPath, readGrant } from './maintainer.mjs'
+import { currentSession, grantsDir, listLive, logPath, readGrant } from './maintainer.mjs'
 import { policyFrom, readAtRef, readAtRoot } from './protected.mjs'
 
 /** The git subcommands agit runs that reach the remote. Never `push`: agit does not push. */
@@ -208,13 +208,17 @@ export function resolveContext({ cwd = process.cwd(), repo: repoArg = null, env 
       })
     },
 
-    /** The maintainer grant as `session` (default: this process's) sees it. */
+    /** The maintainer grants as `session` (default: this process's) sees them. */
     grant(session = currentSession(env)) {
-      return readGrant({ path: grantPath(ctx.gitCommonDir()), session })
+      return readGrant({ dir: grantsDir(ctx.gitCommonDir()), session })
+    },
+    /** Every session's live grant in this clone. */
+    liveGrants() {
+      return listLive(grantsDir(ctx.gitCommonDir()))
     },
     grantFiles() {
       const dir = ctx.gitCommonDir()
-      return { path: grantPath(dir), log: logPath(dir) }
+      return { dir: grantsDir(dir), log: logPath(dir) }
     },
 
     /** The protection policy as the worktree has it — what an edit changes. */
