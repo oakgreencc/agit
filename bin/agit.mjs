@@ -38,6 +38,7 @@ Read path:
   agit api <METHOD> <path> [--body <json>|--body-file <f>] [--paginate] [--raw] [--out <f>]
   agit graphql '<query>' [--vars <json>|--vars-file <f>]
   agit jobs <run-id | run URL> [--logs <dir>] [--all]
+  agit status [<branch>]              what this worktree holds that GitHub does not (run before removing it)
   agit credential get                 git credential helper (git runs this)
 
 Gates and grants:
@@ -61,6 +62,7 @@ const VERBS = {
   api: () => import('../src/cli/api.mjs').then((m) => m.runApi),
   graphql: () => import('../src/cli/api.mjs').then((m) => m.runGraphql),
   jobs: () => import('../src/cli/api.mjs').then((m) => m.runJobs),
+  status: () => import('../src/cli/status.mjs').then((m) => m.run),
   credential: () => import('../src/cli/credential.mjs').then((m) => m.run),
   validate: () => import('../src/cli/validate.mjs').then((m) => m.run),
   protected: () => import('../src/cli/protected.mjs').then((m) => m.run),
