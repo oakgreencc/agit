@@ -12,6 +12,7 @@ export const VERBS = {
   api: () => import('./api.mjs').then((m) => m.runApi),
   graphql: () => import('./api.mjs').then((m) => m.runGraphql),
   jobs: () => import('./api.mjs').then((m) => m.runJobs),
+  status: () => import('./status.mjs').then((m) => m.run),
   credential: () => import('./credential.mjs').then((m) => m.run),
   validate: () => import('./validate.mjs').then((m) => m.run),
   protected: () => import('./protected.mjs').then((m) => m.run),
