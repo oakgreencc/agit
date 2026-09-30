@@ -173,6 +173,19 @@ export function fakeGitHub(bare) {
         throw err(404, path)
       }
     }
+    // `agit publish` asks whether the branch already has an open PR, and opens one.
+    const openFor = /^GET \/repos\/o\/r\/pulls\?state=open&head=([^&]+)$/.exec(key)
+    if (openFor) {
+      const branch = decodeURIComponent(openFor[1]).replace(/^o:/, '')
+      return [...pulls.values()]
+        .filter((p) => p.head === branch && !p.merged)
+        .map((p) => ({ number: p.number, html_url: `https://github.com/o/r/pull/${p.number}` }))
+    }
+    if (key === 'POST /repos/o/r/pulls') {
+      const number = pulls.size + 1
+      pulls.set(number, { number, head: body.head, base: body.base })
+      return { number, html_url: `https://github.com/o/r/pull/${number}` }
+    }
     const pull = /^GET \/repos\/o\/r\/pulls\/(\d+)(\/files\?.*)?$/.exec(key)
     if (pull) {
       const pr = pulls.get(Number(pull[1]))

@@ -30,10 +30,16 @@ A hook the project requires is missing (a bad `hooks.path`, a file without `+x`)
 Update agit on this machine (human task), then retry.
 
 ## `refusing to advance: N paths changed on the branch AND in this worktree`
-Your uncommitted edits collide with new commits on the branch. `git merge <sha>` (the message names it), resolve, `git commit`, then `agit merge <branch>`.
+Your uncommitted edits collide with new commits on the branch. `git merge --no-commit <sha>` (the message names it), resolve, `git add`, then `agit merge <branch>`. No local commit is needed.
 
 ## `refusing to merge: HEAD's first parent is X, but the branch head on GitHub is Y`
-The merge was made on a stale worktree. `agit advance <branch>`, redo the merge, `agit merge <branch>`.
+The merge was made on a stale worktree. `git merge --abort` (if a merge is still in progress), `agit advance <branch>`, redo the merge with `git merge --no-commit`, `agit merge <branch>`.
+
+## `refusing to merge: N unmerged paths in the index`
+A merge in progress still has conflicts. Resolve each named path, `git add` it, run `agit merge <branch>` again. Nothing was published.
+
+## `worktree NOT advanced: a merge in progress (of X) is not on the branch`
+The worktree is mid-merge with something the branch does not contain. Publish it with `agit merge <branch>`, or `git merge --abort` it, then advance.
 
 ## `agit pr merge` refusals
 - **base not in mergeableBases** — this project does not let agents merge into that branch; hand the PR to a human.

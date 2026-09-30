@@ -25,6 +25,7 @@ import {
   publishWorktree,
   resolveBranch,
 } from '../src/publish/publish.mjs'
+import { runPublish } from '../src/cli/publish.mjs'
 import { hookScenario, must, run, scenario, status } from './fixtures.mjs'
 
 test('publish: modifications, a deletion, an untracked file and an exec bit land as one commit whose tree GitHub rebuilds identically', async () => {
@@ -73,6 +74,255 @@ test('publish: modifications, a deletion, an untracked file and an exec bit land
     assert.deepEqual(must(adv.recorded).sort(), ['a.txt', 'b.txt', 'new.txt', 'run.sh'])
     assert.equal(run(wt, ['rev-parse', 'HEAD']).trim(), out.commit.sha)
     assert.equal(status(wt), ' M d/c.txt')
+  } finally {
+    s.cleanup()
+  }
+})
+
+/**
+ * agent/x on "GitHub" (published as the App) edits a.txt one way; develop
+ * then moves on "GitHub", editing a.txt the other way and adding theirs.txt.
+ * The worktree is on agent/x's head with origin/develop fetched — the moment
+ * before the agent's `git merge`. `make` builds the underlying scenario.
+ *
+ * @template {ReturnType<typeof scenario>} S
+ * @param {() => S} [make]
+ */
+async function conflictScenario(make = /** @type {() => S} */ (scenario)) {
+  const s = make()
+  const { wt, bare, git, client } = s
+  const develop = run(bare, ['rev-parse', 'refs/heads/develop']).trim()
+  run(wt, ['checkout', '-q', '--detach', develop])
+  writeFileSync(join(wt, 'a.txt'), 'mine\n')
+  const pub = await publishWorktree({
+    git,
+    client,
+    owner: 'o',
+    repo: 'r',
+    branch: 'agent/x',
+    head: null,
+    base: { sha: develop, tree: run(bare, ['rev-parse', `${develop}^{tree}`]).trim() },
+    message: 'mine',
+    paths: ['a.txt'],
+  })
+  run(wt, ['fetch', '-q', 'origin'])
+  advance({ git, target: pub.commit.sha })
+
+  const devIndex = { GIT_INDEX_FILE: join(bare, 'dev-index') }
+  run(bare, ['read-tree', develop], { env: devIndex })
+  const theirsA = run(bare, ['hash-object', '-w', '--stdin'], { input: 'theirs\n' }).trim()
+  const theirsT = run(bare, ['hash-object', '-w', '--stdin'], { input: 'theirs file\n' }).trim()
+  run(bare, ['update-index', '--add', '--cacheinfo', `100644,${theirsA},a.txt`], { env: devIndex })
+  run(bare, ['update-index', '--add', '--cacheinfo', `100644,${theirsT},theirs.txt`], { env: devIndex })
+  const devTree = run(bare, ['write-tree'], { env: devIndex }).trim()
+  const develop2 = run(bare, ['commit-tree', devTree, '-p', develop, '-m', 'theirs']).trim()
+  run(bare, ['update-ref', 'refs/heads/develop', develop2])
+  run(wt, ['fetch', '-q', 'origin', 'develop'])
+  return { ...s, pub, develop2 }
+}
+
+const merging = (wt) => {
+  try {
+    run(wt, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])
+    return true
+  } catch {
+    return false
+  }
+}
+
+test('merge --no-commit: a resolved, uncommitted merge is published as a two-parent commit with the stripped MERGE_MSG — no local commit — and advance ends clean with the merge state cleared', async () => {
+  const s = await conflictScenario()
+  try {
+    const { wt, bare, git, client, pub, develop2 } = s
+    const before = run(wt, ['rev-parse', 'HEAD']).trim()
+    assert.throws(() => run(wt, ['merge', '--no-commit', 'origin/develop']))
+    assert.match(status(wt), /^UU a\.txt/m)
+    writeFileSync(join(wt, 'a.txt'), 'mine and theirs\n')
+    run(wt, ['add', 'a.txt'])
+    const indexTree = run(wt, ['write-tree']).trim()
+
+    const head = must(await resolveBranch({ client, owner: 'o', repo: 'r', branch: 'agent/x' }))
+    const out = await publishMerge({ git, client, owner: 'o', repo: 'r', branch: 'agent/x', head })
+    assert.equal(out.kind, 'merge')
+    assert.deepEqual(/** @type {any} */ (out).parents, [pub.commit.sha, develop2])
+    // No local commit was made: HEAD has not moved, and the merge is still in progress.
+    assert.equal(run(wt, ['rev-parse', 'HEAD']).trim(), before)
+    assert.ok(merging(wt), 'publishMerge alone (--no-advance) leaves MERGE_HEAD in place')
+
+    const remoteHead = run(bare, ['rev-parse', 'refs/heads/agent/x']).trim()
+    assert.equal(remoteHead, out.commit.sha)
+    assert.equal(run(bare, ['rev-parse', `${remoteHead}^{tree}`]).trim(), indexTree)
+    assert.equal(
+      run(bare, ['rev-list', '--parents', '-n', '1', remoteHead]).trim(),
+      `${remoteHead} ${pub.commit.sha} ${develop2}`,
+    )
+    const message = run(bare, ['log', '-1', '--format=%B', remoteHead]).trim()
+    assert.match(message, /^Merge remote-tracking branch 'origin\/develop'/)
+    assert.doesNotMatch(message, /#|Conflicts/)
+
+    run(wt, ['fetch', '-q', 'origin', 'agent/x'])
+    const adv = advance({ git, target: out.commit.sha })
+    assert.equal(adv.advanced, true, adv.reason)
+    assert.equal(run(wt, ['rev-parse', 'HEAD']).trim(), out.commit.sha)
+    assert.equal(status(wt), '')
+    assert.equal(merging(wt), false)
+  } finally {
+    s.cleanup()
+  }
+})
+
+test('merge --no-commit: an index with unmerged paths is refused, naming them, and nothing is published', async () => {
+  const s = await conflictScenario()
+  try {
+    const { wt, bare, git, client, pub } = s
+    assert.throws(() => run(wt, ['merge', '--no-commit', 'origin/develop']))
+    const head = must(await resolveBranch({ client, owner: 'o', repo: 'r', branch: 'agent/x' }))
+    await assert.rejects(
+      publishMerge({ git, client, owner: 'o', repo: 'r', branch: 'agent/x', head }),
+      /1 unmerged path in the index:\n\n {2}a\.txt\n/,
+    )
+    assert.equal(run(bare, ['rev-parse', 'refs/heads/agent/x']).trim(), pub.commit.sha)
+    assert.ok(merging(wt))
+  } finally {
+    s.cleanup()
+  }
+})
+
+test('merge --no-commit with hooks: pre-commit runs on the real index and what it stages ships; commit-msg runs on MERGE_MSG', async () => {
+  const s = await conflictScenario(() =>
+    hookScenario({
+      'pre-commit': [
+        'set -e',
+        'git diff --cached --name-only > "$AGIT_TEST_OUT"',
+        'printf "hooked\\n" >> a.txt',
+        'git add a.txt',
+      ].join('\n'),
+      'commit-msg': 'printf "\\nReviewed-by: hook\\n" >> "$1"',
+    }),
+  )
+  try {
+    const { wt, bare, git, client, root } = s
+    const seen = join(root, 'staged')
+    process.env.AGIT_TEST_OUT = seen
+    assert.throws(() => run(wt, ['merge', '--no-commit', 'origin/develop']))
+    writeFileSync(join(wt, 'a.txt'), 'mine and theirs\n')
+    run(wt, ['add', 'a.txt'])
+
+    const head = must(await resolveBranch({ client, owner: 'o', repo: 'r', branch: 'agent/x' }))
+    const out = await publishMerge({
+      git, client, owner: 'o', repo: 'r', branch: 'agent/x', head, hooks: s.wire('agent/x', head.sha),
+    })
+    // The hook saw the resolved merge staged in the real index.
+    assert.equal(readFileSync(seen, 'utf8'), 'a.txt\ntheirs.txt\n')
+    assert.deepEqual(s.runner.ran, ['pre-commit', 'commit-msg'])
+    const remoteHead = run(bare, ['rev-parse', 'refs/heads/agent/x']).trim()
+    assert.equal(remoteHead, out.commit.sha)
+    assert.equal(run(bare, ['show', `${remoteHead}:a.txt`]), 'mine and theirs\nhooked\n')
+    const message = run(bare, ['log', '-1', '--format=%B', remoteHead]).trim()
+    assert.match(message, /^Merge remote-tracking branch 'origin\/develop'[\s\S]*\n\nReviewed-by: hook$/)
+    assert.doesNotMatch(message, /Conflicts/)
+  } finally {
+    delete process.env.AGIT_TEST_OUT
+    s.cleanup()
+  }
+})
+
+test('a retry after a lost response is a no-op success, not a failure', async () => {
+  const s = scenario()
+  try {
+    const { wt, bare, git, client } = s
+    writeFileSync(join(wt, 'a.txt'), 'changed\n')
+    const base = must(await resolveBranch({ client, owner: 'o', repo: 'r', branch: 'develop' }))
+    const input = { git, client, owner: 'o', repo: 'r', branch: 'agent/x', message: 'feat: x', paths: ['a.txt'] }
+    // The first publish lands; its response is "lost", so the worktree is
+    // never advanced — it still sits on develop with a.txt modified.
+    const first = await publishWorktree({ ...input, head: null, base })
+    assert.equal(first.noop, false)
+    const writes = client.calls.length
+
+    // The retry resolves the branch the first run created. The worktree's
+    // tree over the branch head is the head's own tree.
+    const head = must(await resolveBranch({ client, owner: 'o', repo: 'r', branch: 'agent/x' }))
+    run(wt, ['fetch', '-q', 'origin', 'agent/x'])
+    const again = await publishWorktree({ ...input, head, base: null })
+    assert.equal(again.noop, true)
+    assert.deepEqual(again.commit, { sha: first.commit.sha, url: null, verified: null })
+    assert.equal(again.created, false)
+    assert.deepEqual(again.changed, [])
+    // Nothing written: two GETs for the resolve, no blob, tree, commit or ref.
+    assert.deepEqual(
+      client.calls.slice(writes).map((c) => c.method),
+      ['GET', 'GET'],
+    )
+    assert.equal(run(bare, ['rev-parse', 'refs/heads/agent/x']).trim(), first.commit.sha)
+
+    // …and once advanced, a re-run with nothing dirty is the same answer.
+    advance({ git, target: first.commit.sha })
+    const clean = await publishWorktree({ ...input, head, base: null })
+    assert.equal(clean.noop, true)
+    assert.deepEqual(clean.changed, [])
+  } finally {
+    s.cleanup()
+  }
+})
+
+test('a publish with nothing to publish onto a branch that does not exist yet is still refused', async () => {
+  const s = scenario()
+  try {
+    const { git, client } = s
+    const base = must(await resolveBranch({ client, owner: 'o', repo: 'r', branch: 'develop' }))
+    await assert.rejects(
+      publishWorktree({ git, client, owner: 'o', repo: 'r', branch: 'agent/x', head: null, base, message: 'm', paths: null }),
+      /no changes in worktree/,
+    )
+  } finally {
+    s.cleanup()
+  }
+})
+
+/** Run `fn` with console.log captured; returns the lines. */
+async function captured(fn) {
+  /** @type {string[]} */
+  const lines = []
+  const log = console.log
+  console.log = (...args) => void lines.push(args.join(' '))
+  try {
+    await fn()
+  } finally {
+    console.log = log
+  }
+  return lines
+}
+
+test('agit publish, retried after a lost response: says nothing was published, reuses the open PR, and still advances', async () => {
+  const s = scenario()
+  try {
+    const { wt, bare, git, client } = s
+    writeFileSync(join(wt, 'a.txt'), 'changed\n')
+    const argv = ['agent/x', 'feat: x', '--paths', 'a.txt', '--base', 'develop', '--pr', 'X', '--repo', 'o/r', '-C', wt]
+    // The first run lands the commit and opens the PR; its "response is lost"
+    // before the worktree advances (--no-advance stands in for that).
+    const first = await captured(() => runPublish([...argv, '--no-advance'], { client }))
+    assert.ok(first.includes('published 1 path to o/r@agent/x'), first.join('\n'))
+    assert.ok(first.includes('pr: https://github.com/o/r/pull/1'), first.join('\n'))
+    const landed = run(bare, ['rev-parse', 'refs/heads/agent/x']).trim()
+
+    const before = client.calls.length
+    const again = await captured(() => runPublish(argv, { client }))
+    assert.ok(
+      again.includes('nothing to publish: o/r@agent/x already has this content — no commit made'),
+      again.join('\n'),
+    )
+    assert.ok(again.includes('pr: https://github.com/o/r/pull/1 (already open)'), again.join('\n'))
+    assert.ok(again.some((l) => l.startsWith(`worktree advanced to ${landed.slice(0, 7)}`)), again.join('\n'))
+    // No second commit, ref move or PR.
+    assert.deepEqual(
+      client.calls.slice(before).filter((c) => c.method !== 'GET'),
+      [],
+    )
+    assert.equal(run(bare, ['rev-parse', 'refs/heads/agent/x']).trim(), landed)
+    assert.equal(run(wt, ['rev-parse', 'HEAD']).trim(), landed)
+    assert.equal(status(wt), '')
   } finally {
     s.cleanup()
   }
@@ -157,6 +407,82 @@ test('merge: a locally resolved conflict is published as a two-parent commit wit
     assert.notEqual(localMerge, out.commit.sha)
     assert.equal(run(wt, ['rev-parse', 'HEAD']).trim(), out.commit.sha)
     assert.equal(status(wt), '')
+  } finally {
+    s.cleanup()
+  }
+})
+
+test('merge of a stale branch: the tree is built on the merged-in parent, and GitHub rebuilds the local tree exactly', async () => {
+  const s = scenario()
+  try {
+    const { wt, bare, git, client } = s
+    const develop = run(bare, ['rev-parse', 'refs/heads/develop']).trim()
+
+    // agent/x on "GitHub": one edit to a.txt, published by the App.
+    run(wt, ['checkout', '-q', '--detach', develop])
+    writeFileSync(join(wt, 'a.txt'), 'mine\n')
+    const pub = await publishWorktree({
+      git,
+      client,
+      owner: 'o',
+      repo: 'r',
+      branch: 'agent/x',
+      head: null,
+      base: { sha: develop, tree: run(bare, ['rev-parse', `${develop}^{tree}`]).trim() },
+      message: 'mine',
+    })
+    run(wt, ['fetch', '-q', 'origin'])
+    advance({ git, target: pub.commit.sha })
+
+    // develop runs far ahead: six new files, none touching a.txt.
+    const devIndex = { GIT_INDEX_FILE: join(bare, 'dev-index') }
+    run(bare, ['read-tree', develop], { env: devIndex })
+    for (let i = 0; i < 6; i++) {
+      const blob = run(bare, ['hash-object', '-w', '--stdin'], { input: `dev ${i}\n` }).trim()
+      run(bare, ['update-index', '--add', '--cacheinfo', `100644,${blob},dev/${i}.txt`], { env: devIndex })
+    }
+    const devTree = run(bare, ['write-tree'], { env: devIndex }).trim()
+    const develop2 = run(bare, ['commit-tree', devTree, '-p', develop, '-m', 'ahead']).trim()
+    run(bare, ['update-ref', 'refs/heads/develop', develop2])
+
+    run(wt, ['fetch', '-q', 'origin', 'develop'])
+    run(wt, ['merge', '-q', '--no-edit', 'origin/develop'])
+    const localTree = run(wt, ['rev-parse', 'HEAD^{tree}']).trim()
+
+    const head = must(await resolveBranch({ client, owner: 'o', repo: 'r', branch: 'agent/x' }))
+    /** @type {string[]} */
+    const reports = []
+    const before = client.calls.length
+    const out = await publishMerge({
+      git,
+      client,
+      owner: 'o',
+      repo: 'r',
+      branch: 'agent/x',
+      head,
+      report: (line) => reports.push(line),
+    })
+    assert.equal(out.kind, 'merge')
+    assert.ok(
+      reports.includes('building the merge tree on the merged-in parent (1 path, vs 6 from the head)'),
+      reports.join('\n'),
+    )
+    const trees = client.calls.slice(before).filter((c) => c.path === '/repos/o/r/git/trees')
+    assert.equal(trees.length, 1)
+    assert.equal(trees[0].body.base_tree, devTree)
+    assert.deepEqual(
+      trees[0].body.tree.map((e) => e.path),
+      ['a.txt'],
+    )
+    const shipped = /** @type {any} */ (out).shipped
+    assert.deepEqual(shipped.uploaded, []) // a.txt's blob is already the head's
+
+    const remoteHead = run(bare, ['rev-parse', 'refs/heads/agent/x']).trim()
+    assert.equal(run(bare, ['rev-parse', `${remoteHead}^{tree}`]).trim(), localTree)
+    assert.equal(
+      run(bare, ['rev-list', '--parents', '-n', '1', remoteHead]).trim(),
+      `${remoteHead} ${pub.commit.sha} ${develop2}`,
+    )
   } finally {
     s.cleanup()
   }

@@ -29,7 +29,7 @@ const HELP = `agit ${VERSION} — work a GitHub project as a GitHub App
 
 Write path (every write is a Verified commit created by GitHub):
   agit publish <branch> <message> (--paths a,b | --all) [--pr <title>] [...]
-  agit merge <branch>                 publish a completed local merge
+  agit merge <branch>                 publish a local merge (git merge --no-commit → resolve → git add)
   agit advance <branch>               move HEAD onto the branch head, keeping work
   agit pr merge <n> [--auto]          merge a PR, if policy allows
   agit pr update <n>                  bring a PR up to date with its base

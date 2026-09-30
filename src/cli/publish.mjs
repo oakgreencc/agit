@@ -152,15 +152,19 @@ async function resolveTarget({ client, owner, repo, branch, base }) {
   return { head: null, baseHead: { ...baseHead, branch: base } }
 }
 
-/** Whether `branch` has an open PR. A failure to find out counts as no — the note is advice. */
-async function hasOpenPr({ client, owner, repo, branch }) {
+/**
+ * The open PR for `branch`, read-only: its URL, or `null`. A failure to find
+ * out counts as none — what this feeds is advice, and a second PR POST that
+ * GitHub refuses says so itself.
+ */
+async function openPr({ client, owner, repo, branch }) {
   try {
     const prs = await client.api(
       `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`,
     )
-    return Array.isArray(prs) && prs.length > 0
+    return Array.isArray(prs) && prs.length ? (prs[0].html_url ?? '(open)') : null
   } catch {
-    return false
+    return null
   }
 }
 
@@ -231,7 +235,11 @@ function reportCommit(commit) {
 // `publish`
 // ---------------------------------------------------------------------------
 
-export async function runPublish(argv) {
+/**
+ * @param {string[]} argv
+ * @param {{ client?: import('../github/app.mjs').Client | null }} [deps]   `client` replaces the minted one (tests)
+ */
+export async function runPublish(argv, { client: given = null } = {}) {
   if (has(argv, '--help')) {
     console.log(PUBLISH_USAGE)
     return 0
@@ -240,7 +248,7 @@ export async function runPublish(argv) {
   if (!branch || !message) throw new PublishError(PUBLISH_USAGE)
   if (branch.startsWith('-')) throw new PublishError(`refusing to publish: "${branch}" is not a branch name.\n\n${PUBLISH_USAGE}`)
 
-  const ctx = contextFrom(argv)
+  const ctx = contextFrom(argv, { client: given })
   const { git } = ctx
 
   // Before anything else, and before any credential is read: what is this
@@ -272,7 +280,9 @@ export async function runPublish(argv) {
   const { head, baseHead } = await resolveTarget({ client, owner, repo, branch, base })
   const target = /** @type {any} */ (head ?? baseHead)
   ensureLocal({ git, head: target })
-  const noPr = !prTitle && !(head && (await hasOpenPr({ client, owner, repo, branch })))
+  // Read before the write, said after the commit line: a branch nobody opened
+  // a PR for is a branch CI never runs on.
+  const existing = head ? await openPr({ client, owner, repo, branch }) : null
 
   const { runner, hooks } = publishHooks({ ctx, skip: skipHooks, branch, remoteSha: head?.sha ?? null })
   const out = await publishWorktree({
@@ -291,17 +301,25 @@ export async function runPublish(argv) {
   })
   if (runner.ran.length) console.log(`hooks: ${runner.ran.join(', ')}`)
   if (out.created && baseHead) console.log(`created ${branch} from ${base} @ ${baseHead.sha.slice(0, 7)}`)
-  console.log(`published ${out.changed.length} path${out.changed.length === 1 ? '' : 's'} to ${full}@${branch}`)
+  console.log(
+    out.noop
+      ? // The retry after a lost response: the first run landed, so this one
+        // writes nothing and goes on to the PR and the advance.
+        `nothing to publish: ${full}@${branch} already has this content — no commit made`
+      : `published ${out.changed.length} path${out.changed.length === 1 ? '' : 's'} to ${full}@${branch}`,
+  )
   reportCommit(out.commit)
   if (closing.length)
     // Say WHEN: "closes" reads as "closes now", and it does not — the keyword
     // fires when this commit reaches the repository's default branch.
     console.log(`closing when this commit reaches the default branch: ${closing.join(', ')}`)
   if (notClosing.length)
-    console.log(`quoted, so NOT closing: ${notClosing.join(', ')} — use --closes if you meant it`)
-  if (noPr) console.log(noPrNote({ branch, base }))
+    // Dropping a keyword without a word would be invisible. Name it, and the flag.
+    console.log(`NOT closing (quoted or negated): ${notClosing.join(', ')} — use --closes if you meant it`)
+  if (!prTitle && !existing) console.log(noPrNote({ branch, base }))
 
-  if (prTitle) {
+  if (prTitle && existing) console.log(`pr: ${existing} (already open)`)
+  else if (prTitle) {
     // The body falls back to the commit message, not a bare "automated work"
     // line, which told a reviewer nothing.
     const pr = await client.json(`/repos/${owner}/${repo}/pulls`, 'POST', {
@@ -329,8 +347,9 @@ export async function runPublish(argv) {
 
 const MERGE_USAGE =
   'usage: agit merge <branch> [--message <text>] [--base <b>] [--allow-large a,b] [--no-advance] [--no-verify] [--stale-base-ok] [-C <dir>] [--repo <owner/repo>]\n\n' +
-  'Publishes the worktree\'s completed local merge (git fetch → git merge origin/<x> → resolve →\n' +
-  'git commit) as a two-parent commit GitHub creates, Verified as the App.'
+  'Publishes the worktree\'s local merge (git fetch → git merge --no-commit origin/<x> → resolve →\n' +
+  'git add) as a two-parent commit GitHub creates, Verified as the App. No local commit is needed;\n' +
+  'a merge already committed locally publishes the same way. --message overrides MERGE_MSG.'
 
 export async function runMerge(argv) {
   if (has(argv, '--help')) {

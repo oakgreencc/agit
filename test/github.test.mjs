@@ -12,7 +12,13 @@ import { join } from 'node:path'
 import { explain } from '../src/cli/explain.mjs'
 import { run as pr } from '../src/cli/pr.mjs'
 import { PublishError } from '../src/errors.mjs'
-import { createClient, isNotFound } from '../src/github/app.mjs'
+import {
+  createClient,
+  isNotFound,
+  retryServerErrors,
+  SERVER_ERROR_RETRIES,
+  serverErrorWait,
+} from '../src/github/app.mjs'
 import { clientOver, commitOn, run, scenario } from './fixtures.mjs'
 
 // ---------------------------------------------------------------------------
@@ -70,6 +76,112 @@ test('download: the body as bytes, authenticated; a refusal carries its status',
   assert.deepEqual([...(await client.download('/zip'))], [0, 1, 255])
   assert.equal(seen.headers.Authorization, 'token tok')
   await assert.rejects(client.download('/gone'), (err) => /** @type {any} */ (err).status === 410)
+})
+
+test('explain blames the App credentials only for a missing credential file', () => {
+  const enoent = (/** @type {string} */ path) => new Error(`ENOENT: no such file or directory, open '${path}'`)
+  const env = { AGIT_HOME: '/home/a/.config/agit' }
+  const apps = join(env.AGIT_HOME, 'apps', 'my-app')
+  assert.equal(explain(enoent('.claude/scratch/body.md'), env), null)
+  assert.equal(explain(enoent('/tmp/private-key.pem'), env), null) // the name alone is not enough
+  assert.match(String(explain(enoent(join(apps, 'private-key.pem')), env)), /Missing App credentials/)
+  assert.match(String(explain(enoent(join(apps, 'app.json')), env)), /Missing App credentials/)
+  const custom = '/keys/elsewhere.pem'
+  assert.equal(explain(enoent(custom), env), null)
+  assert.match(String(explain(enoent(custom), { ...env, AGIT_PRIVATE_KEY_PATH: custom })), /Missing App credentials/)
+  // A real fs error carries the path on `err.path`; that wins over the message.
+  const real = Object.assign(enoent('ignored'), { code: 'ENOENT', path: join(apps, 'app.json') })
+  assert.match(String(explain(real, env)), /Missing App credentials/)
+  const body = Object.assign(enoent(join(apps, 'app.json')), { code: 'ENOENT', path: 'missing.md' })
+  assert.equal(explain(body, env), null)
+})
+
+// --- serverErrorWait: a 5xx on a content-addressed write is worth repeating ----------
+
+const failed = (status) => Object.assign(new Error(`/x: ${status} {"message":"Server Error"}`), { status })
+
+test('serverErrorWait: 500/502/503/504 wait a second, doubling on every further attempt', () => {
+  for (const status of [500, 502, 503, 504]) {
+    assert.equal(serverErrorWait(failed(status), 0), 1_000)
+    assert.equal(serverErrorWait(failed(status), 1), 2_000)
+    assert.equal(serverErrorWait(failed(status), 3), 8_000)
+  }
+})
+
+test('serverErrorWait: anything else is not a server error', () => {
+  for (const status of [400, 403, 404, 422, 429, 501, 505]) {
+    assert.equal(serverErrorWait(failed(status), 0), null)
+  }
+  // A status only in the message is not trusted: the client sets `status`.
+  assert.equal(serverErrorWait(new Error('/x: 502 boom'), 0), null)
+  assert.equal(serverErrorWait(new TypeError('fetch failed'), 0), null)
+})
+
+test('the client itself never retries a 5xx — that is the caller’s call, per endpoint', async () => {
+  let calls = 0
+  const fetch = /** @type {typeof globalThis.fetch} */ (async () => {
+    calls++
+    return new Response('{"message":"Server Error"}', { status: 502 })
+  })
+  const client = createClient({ token: 'ghs_t', fetch, sleep: async () => assert.fail('slept') })
+  await assert.rejects(client.json('/repos/o/r/git/commits', 'POST', {}), /: 502 /)
+  assert.equal(calls, 1)
+})
+
+test('retryServerErrors repeats a 5xx with doubling waits, reporting each, and returns the answer', async () => {
+  let calls = 0
+  /** @type {number[]} */
+  const waits = []
+  /** @type {string[]} */
+  const reports = []
+  const out = await retryServerErrors(
+    'POST /repos/o/r/git/trees',
+    async () => {
+      if (++calls < 3) throw failed(calls === 1 ? 502 : 503)
+      return { sha: 'abc' }
+    },
+    { sleep: async (ms) => void waits.push(ms), report: (line) => reports.push(line) },
+  )
+  assert.deepEqual(out, { sha: 'abc' })
+  assert.equal(calls, 3)
+  assert.deepEqual(waits, [1_000, 2_000])
+  assert.deepEqual(reports, [
+    `server error (502) on POST /repos/o/r/git/trees: waiting 1s (retry 1/${SERVER_ERROR_RETRIES})`,
+    `server error (503) on POST /repos/o/r/git/trees: waiting 2s (retry 2/${SERVER_ERROR_RETRIES})`,
+  ])
+})
+
+test('retryServerErrors gives up after SERVER_ERROR_RETRIES and never retries a non-5xx', async () => {
+  let calls = 0
+  /** @type {number[]} */
+  const waits = []
+  await assert.rejects(
+    retryServerErrors(
+      'POST /t',
+      async () => {
+        calls++
+        throw failed(502)
+      },
+      { sleep: async (ms) => void waits.push(ms) },
+    ),
+    /: 502 /,
+  )
+  assert.equal(calls, SERVER_ERROR_RETRIES + 1)
+  assert.deepEqual(waits, [1_000, 2_000, 4_000, 8_000].slice(0, SERVER_ERROR_RETRIES))
+
+  calls = 0
+  await assert.rejects(
+    retryServerErrors(
+      'POST /t',
+      async () => {
+        calls++
+        throw failed(422)
+      },
+      { sleep: async () => assert.fail('slept') },
+    ),
+    /: 422 /,
+  )
+  assert.equal(calls, 1)
 })
 
 test('isNotFound and explain read the status the client attaches', () => {

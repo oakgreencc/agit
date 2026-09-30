@@ -30,7 +30,7 @@ Every verb takes `-C <dir>` and `--repo <owner/repo>` (default: the `origin` rem
 | Need | Verb |
 |---|---|
 | Branch moved under you / follow someone's branch | `agit advance <branch>` — never `reset --hard` |
-| Merge conflict | `git fetch origin <base>`, `git merge origin/<base>`, resolve, `git commit`, then `agit merge <branch>` |
+| Merge conflict | `git fetch origin <base>`, `git merge --no-commit origin/<base>`, resolve, `git add`, then `agit merge <branch>` (no local commit) |
 | Merge a PR | `agit pr merge <n>` (`--auto` to queue) |
 | Update a PR from its base | `agit pr update <n>` |
 | Issues, comments, reviews, labels | `agit api POST /repos/o/r/issues/12/comments --body '{"body":"…"}'` |
