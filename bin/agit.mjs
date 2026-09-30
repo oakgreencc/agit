@@ -42,6 +42,7 @@ Read path:
   agit jobs <run-id | run URL> [--logs <dir>] [--all]
   agit ci wait <sha|ref> [--check c]  one check's verdict: exit 0 green, 1 red, 2 unknowable
   agit issue read <n>                 an issue as JSON (with the etag \`issue edit\` needs)
+  agit status [<branch>]              what this worktree holds that GitHub does not (run before removing it)
   agit credential get                 git credential helper (git runs this)
 
 Gates and grants:

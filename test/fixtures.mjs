@@ -206,8 +206,39 @@ export function fakeGitHub(bare) {
     }
     const compare = /^GET \/repos\/o\/r\/compare\/([^.]+)\.\.\.([0-9a-f]{40})$/.exec(key)
     if (compare) {
-      const behind = g(['rev-list', '--count', `${compare[2]}..refs/heads/${decodeURIComponent(compare[1])}`]).trim()
-      return { behind_by: Number(behind) }
+      const ref = decodeURIComponent(compare[1])
+      const [b, h] = [/^[0-9a-f]{40}$/.test(ref) ? ref : `refs/heads/${ref}`, compare[2]]
+      let behind, ahead
+      try {
+        behind = Number(g(['rev-list', '--count', `${h}..${b}`]).trim())
+        ahead = Number(g(['rev-list', '--count', `${b}..${h}`]).trim())
+      } catch {
+        throw err(404, path) // either side unknown to GitHub
+      }
+      const status = ahead && behind ? 'diverged' : ahead ? 'ahead' : behind ? 'behind' : 'identical'
+      return { status, ahead_by: ahead, behind_by: behind }
+    }
+    const commitPulls = /^GET \/repos\/o\/r\/commits\/([0-9a-f]{40})\/pulls(\?.*)?$/.exec(key)
+    if (commitPulls) {
+      // The PRs whose head contains the commit, as GitHub associates them.
+      return [...pulls.values()]
+        .filter((pr) => {
+          try {
+            g(['merge-base', '--is-ancestor', commitPulls[1], pullHead(pr)])
+            return true
+          } catch {
+            return false
+          }
+        })
+        .map(pullSummary)
+    }
+    const pullsOf = /^GET \/repos\/o\/r\/pulls\?(.*)$/.exec(key)
+    if (pullsOf) {
+      const q = new URLSearchParams(pullsOf[1])
+      const head = q.get('head')?.replace(/^o:/, '')
+      return [...pulls.values()]
+        .filter((pr) => pr.head === head && (q.get('state') !== 'open' || !pr.merged))
+        .map(pullSummary)
     }
     const runs = /^GET \/repos\/o\/r\/commits\/([^/]+)\/check-runs\?/.exec(key)
     if (runs) {
@@ -225,14 +256,31 @@ export function fakeGitHub(bare) {
     throw err(404, path)
   }
 
-  /** @type {Map<number, { number: number, head: string, base: string, merged?: boolean }>} */
+  /** @type {Map<number, { number: number, head: string, base: string, headSha: string, merged?: boolean }>} */
   const pulls = new Map()
+  /** A PR's head: its branch while it exists, else the sha GitHub keeps as refs/pull/N/head. */
+  const pullHead = (pr) => {
+    try {
+      return g(['rev-parse', '--verify', '-q', `refs/heads/${pr.head}`]).trim()
+    } catch {
+      return pr.headSha
+    }
+  }
+  const pullSummary = (pr) => ({
+    number: pr.number,
+    state: pr.merged ? 'closed' : 'open',
+    merged_at: pr.merged ? '2026-09-26T00:00:00Z' : null,
+    html_url: `https://github.com/o/r/pull/${pr.number}`,
+    base: { ref: pr.base },
+    head: { ref: pr.head, sha: pullHead(pr) },
+  })
   /** @type {Map<string, { conclusion: string }>} */
   const checks = new Map()
   return Object.assign(clientOver(handle), {
     calls,
     /** Open PR `number` from `head` into `base` (both branches on the bare repo). */
-    openPull: (number, head, base) => pulls.set(number, { number, head, base }),
+    openPull: (number, head, base) =>
+      pulls.set(number, { number, head, base, headSha: g(['rev-parse', `refs/heads/${head}`]).trim() }),
     /** The required check's latest run on `ref` (a branch name or a sha). */
     setCheck: (ref, conclusion) => checks.set(ref, { conclusion }),
     pulls,

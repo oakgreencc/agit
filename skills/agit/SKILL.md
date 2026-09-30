@@ -24,6 +24,7 @@ Every verb takes `-C <dir>` and `--repo <owner/repo>` (default: the `origin` rem
    ```
    Name every path with `--paths`; `--all` means every dirty path, untracked included, on purpose. The repo's git hooks (pre-commit, commit-msg, pre-push) run before anything is sent. Done when the output shows `commit: … [Verified]` and, with `--pr`, a `pr:` URL.
 4. **Follow up.** Later commits to the same branch: same `publish` command without `--pr`. The worktree advances onto each published commit automatically.
+5. **Before removing the worktree.** `agit status [<branch>]` says what it holds that GitHub does not (uncommitted paths, commits no branch on GitHub contains, whether the PR merged), checked through the API — never `git fetch` to find out. `publish` and `merge` end with the same verdict line. A worktree tool that reports "discarded N commits" after publishing is counting from where the session started; trust `nothing local that GitHub does not have`.
 
 ## Other writes
 
