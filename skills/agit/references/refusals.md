@@ -43,7 +43,7 @@ The worktree is mid-merge with something the branch does not contain. Publish it
 
 ## `agit pr merge` refusals
 - **base not in mergeableBases** — this project does not let agents merge into that branch; hand the PR to a human.
-- **touches protected paths** — the human merges it (CODEOWNERS requires their review anyway).
+- **touches protected paths** — ask the code owner to approve the PR on GitHub, then run `agit pr merge <n>` again: an approval GitHub counts (an individual `@login` owner of every such path, on the current head — or on an earlier commit when the base's ruleset keeps stale approvals, as agit's does) lets it through, with a note naming the approver. The refusal's "No code-owner approval clears it: …" says what is missing. Paths owned only by a team, or protected only by `.agit.json`, are never cleared this way — the human merges those.
 - **base is red** — merging onto a known break buries it. If this PR is the fix: `agit pr update <n>`, let its required check finish green, then merge; a PR that contains the broken head and passes goes through.
 - **the policy on the base does not parse** — the base's `.agit.json` is broken, so the merge could only be judged by the defaults. Report it; fixing it is a protected change.
 

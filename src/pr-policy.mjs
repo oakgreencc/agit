@@ -16,7 +16,11 @@
  *               idea what the diff contained. CODEOWNERS with "require review
  *               from Code Owners" is the server-side boundary; this refuses
  *               first, by name, instead of letting the agent discover the rule
- *               from a failed merge.
+ *               from a failed merge. With ONE way through: when GitHub's own
+ *               records prove a code owner approved every such path
+ *               (src/code-owner-approval.mjs), the boundary would pass the
+ *               merge, so the tripwire does too — and says so. Otherwise the
+ *               human had to act twice on one decision: approve, then merge.
  *   RED BASE    not onto a base whose required check is failing — stacking a
  *               change on a known break buries it. With ONE way out, because
  *               the rule once deadlocked a repo: the PR that fixed the break
@@ -25,12 +29,12 @@
  *               the break is fixed, and goes through.
  *
  * A maintainer grant with the `merge` scope lifts all three, and the lift is
- * printed, never silent. It lifts agit's opinion only: GitHub's rulesets still
- * apply. An `impossible` path in the diff is not liftable — no grant gives the
+ * printed, never silent; so is a code-owner approval. The grant lifts agit's
+ * opinion only: GitHub's rulesets still apply. An `impossible` path in the diff is not liftable — no grant gives the
  * App a permission it does not hold.
  *
- * FAILURE POSTURE. A fact this cannot read about THE PR (its files) refuses:
- * a merge whose contents cannot be seen cannot be cleared. A fact about the
+ * FAILURE POSTURE. A fact this cannot read about THE PR (its files, its
+ * reviews) refuses: a merge whose contents cannot be seen cannot be cleared. A fact about the
  * BASE's health that cannot be read allows: refusing would block every merge
  * in the repo for the length of an outage, and a stop-the-line rule that
  * cannot be un-stuck is worse than the breakage it prevents.
@@ -45,6 +49,7 @@ import { judge } from './protected.mjs'
  *   files: () => Promise<string[]>,
  *   baseRed?: () => Promise<{ conclusion: string, url?: string } | false | null>,
  *   rescue?: () => Promise<{ ok: boolean, why?: string }>,
+ *   approval?: (paths: string[]) => Promise<{ ok: boolean, why?: string, approvals?: Array<{ login: string, commit: string, onHead: boolean }>, stale?: string | null }>,
  * }} Lookups
  */
 
@@ -104,14 +109,33 @@ export async function mergeVerdict({ pr, allowedBases, policy, policyProblem = n
           '(protected.impossible). A human merges it.',
       })
     if (guarded.length) {
-      const list = guarded.slice(0, 5).map((h) => `  ${h.path} — ${h.why}`)
-      if (guarded.length > 5) list.push(`  … and ${guarded.length - 5} more`)
-      found.push({
-        liftable: true,
-        text:
-          `${label} changes ${guarded.length} protected path${guarded.length === 1 ? '' : 's'}:\n${list.join('\n')}\n` +
-          "These are the code owners' to approve; hand the PR over rather than retrying.",
-      })
+      const approval = await ownerApproval(guarded, lookups)
+      const count = `${guarded.length} protected path${guarded.length === 1 ? '' : 's'}`
+      if (approval.ok) {
+        // The note says which rule let it through: an approval on the head,
+        // or one on an earlier commit that the base's ruleset keeps.
+        const approvals = approval.approvals ?? []
+        notes.push(
+          approval.stale
+            ? `${label} changes ${count}; ` +
+                approvals
+                  .map((a) => `@${a.login} approved ${a.onHead ? 'its current head' : `at ${a.commit.slice(0, 7)}, an earlier commit`}`)
+                  .join('; ') +
+                ` — allowed through because ${approval.stale}.`
+            : `${label} changes ${count}, and code owner${approvals.length === 1 ? '' : 's'} ` +
+                `${approvals.map((a) => `@${a.login}`).join(', ')} approved its current head — allowed through on that approval.`,
+        )
+      } else {
+        const list = guarded.slice(0, 5).map((h) => `  ${h.path} — ${h.why}`)
+        if (guarded.length > 5) list.push(`  … and ${guarded.length - 5} more`)
+        found.push({
+          liftable: true,
+          text:
+            `${label} changes ${count}:\n${list.join('\n')}\n` +
+            "These are the code owners' to approve; hand the PR over rather than retrying." +
+            `\n\nNo code-owner approval clears it: ${approval.why}.`,
+        })
+      }
     }
   }
 
@@ -152,6 +176,31 @@ export async function mergeVerdict({ pr, allowedBases, policy, policyProblem = n
   const blocking = found.filter((r) => !r.liftable || !granted)
   const lifted = granted ? found.filter((r) => r.liftable) : []
   return { ok: blocking.length === 0, refusals: blocking, lifted, notes }
+}
+
+/**
+ * Whether a code owner's approval, as GitHub records it, clears the guarded
+ * paths. A path protected only by agit's own policy (`protected.extra`, the
+ * self-protected files) or owned by no individual has no approval GitHub
+ * would count, so it is never cleared this way — a `merge` grant still lifts it.
+ *
+ * @param {import('./protected.mjs').Protection[]} guarded
+ * @param {Lookups} lookups
+ * @returns {Promise<{ ok: boolean, why?: string, approvals?: Array<{ login: string, commit: string, onHead: boolean }>, stale?: string | null }>}
+ */
+async function ownerApproval(guarded, lookups) {
+  const unowned = guarded.find((h) => !h.owners.length)
+  if (unowned)
+    return {
+      ok: false,
+      why: `${unowned.path} is protected by agit's own policy (${unowned.why}), not by a CODEOWNERS owner whose approval GitHub counts`,
+    }
+  if (!lookups.approval) return { ok: false, why: 'approvals were not checked' }
+  try {
+    return await lookups.approval(guarded.map((h) => h.path))
+  } catch (err) {
+    return { ok: false, why: `that could not be checked: ${/** @type {Error} */ (err).message}` }
+  }
 }
 
 /**
