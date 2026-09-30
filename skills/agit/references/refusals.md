@@ -49,6 +49,16 @@ The worktree is mid-merge with something the branch does not contain. Publish it
 
 A `merge` grant lifts these locally; GitHub's rulesets still apply. The policy is read from the base branch alone — never from your worktree.
 
+## `agit issue` refusals
+- **`--body`** — bodies come from a file: write it, pass `--body-file <f>` (or pipe it with `--body-file -`).
+- **body changed since it was read** (`issue edit`) — someone edited the issue after your `issue read`. Read it again, re-apply your change to the new body, and edit with the new `etag`. Never retry with the old one.
+- **label '…' does not exist** — GitHub would have created it. Check the repo's labels (`agit api GET /repos/o/r/labels --paginate`) for the intended name; creating a new label is the human's call.
+- **did not assign …** — GitHub silently dropped the login: it has no access to the repo, or it is the App itself (which cannot be assigned).
+- **… is unreadable** (`issue read`, exit 1, nothing on stdout) — the line names the status: 404 wrong number/repo, 403 permission. Not "the issue is empty".
+
+## `agit ci wait` verdicts
+Exit 0 green, 1 red, 2 **unknowable** — the newest run was cancelled/skipped/neutral, the wait timed out, or check runs were unreadable three times in a row; the JSON's `reason` says which. Unknowable is never green: re-run the wait (a longer `--timeout`), or find out why the check did not answer. No `--check` and no `requiredCheck` in `.agit.json` is a usage error.
+
 ## GitHub errors
 - **403 not accessible by integration** — the App lacks that permission on purpose (workflows, administration, secrets). Hand it to the human.
 - **404** — wrong repo, or the App is not installed there. `agit doctor`.

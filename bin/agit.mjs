@@ -33,11 +33,14 @@ Write path (every write is a Verified commit created by GitHub):
   agit advance <branch>               move HEAD onto the branch head, keeping work
   agit pr merge <n> [--auto]          merge a PR, if policy allows
   agit pr update <n>                  bring a PR up to date with its base
+  agit issue <action> ...             create, comment, close, edit, assign, label (--body-file)
 
 Read path:
   agit api <METHOD> <path> [--body <json>|--body-file <f>] [--paginate] [--raw] [--out <f>]
   agit graphql '<query>' [--vars <json>|--vars-file <f>]
   agit jobs <run-id | run URL> [--logs <dir>] [--all]
+  agit ci wait <sha|ref> [--check c]  one check's verdict: exit 0 green, 1 red, 2 unknowable
+  agit issue read <n>                 an issue as JSON (with the etag \`issue edit\` needs)
   agit credential get                 git credential helper (git runs this)
 
 Gates and grants:
@@ -66,6 +69,8 @@ const VERBS = {
   protected: () => import('../src/cli/protected.mjs').then((m) => m.run),
   maintainer: () => import('../src/cli/maintainer.mjs').then((m) => m.run),
   pr: () => import('../src/cli/pr.mjs').then((m) => m.run),
+  issue: () => import('../src/cli/issue.mjs').then((m) => m.run),
+  ci: () => import('../src/cli/ci.mjs').then((m) => m.run),
   hook: () => import('../src/hooks/index.mjs').then((m) => m.run),
   setup: () => import('../src/setup/index.mjs').then((m) => m.run),
   doctor: () => import('../src/setup/doctor.mjs').then((m) => m.run),

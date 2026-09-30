@@ -1,6 +1,6 @@
 ---
 name: agit
-description: Write to GitHub through agit, a GitHub App, instead of git push or gh. Use when committing, pushing, opening or merging a PR, commenting on an issue, reading CI logs, or when agit refuses a publish; and when setting up agit (App, credentials, repo bootstrap).
+description: Write to GitHub through agit, a GitHub App, instead of git push or gh. Use when committing, pushing, opening or merging a PR, reading, filing, commenting on or closing an issue, waiting for or reading CI, or when agit refuses a publish; and when setting up agit (App, credentials, repo bootstrap).
 allowed-tools: Bash(agit *), Bash(echo *)
 ---
 
@@ -33,10 +33,19 @@ Every verb takes `-C <dir>` and `--repo <owner/repo>` (default: the `origin` rem
 | Merge conflict | `git fetch origin <base>`, `git merge --no-commit origin/<base>`, resolve, `git add`, then `agit merge <branch>` (no local commit) |
 | Merge a PR | `agit pr merge <n>` (`--auto` to queue) |
 | Update a PR from its base | `agit pr update <n>` |
-| Issues, comments, reviews, labels | `agit api POST /repos/o/r/issues/12/comments --body '{"body":"…"}'` |
+| Read an issue | `agit issue read <n>` — JSON, with the `etag` an edit needs |
+| Open an issue | `agit issue create --title "<t>" --body-file <f> [--labels a,b]` |
+| Comment on an issue or PR | `agit issue comment <n> --body-file <f>` |
+| Close an issue | `agit issue close <n> --body-file <f> [--reason completed\|not_planned\|duplicate]` — comments, then closes |
+| Edit an issue body | `agit issue read <n>`, edit, `agit issue edit <n> --body-file <f> --etag <etag>` — refused if it changed since the read |
+| Assign / label | `agit issue assign <n> --login <l>`; `agit issue label <n> --add a,b --remove c` (added labels must exist) |
+| Wait for CI | `agit ci wait <sha\|branch> [--check <name>]` — exit 0 green, 1 red, 2 unknowable (never treat 2 as green) |
 | Any read | `agit api GET <path>` — add `--paginate` on every list |
 | Why CI failed | `agit jobs <run URL> --logs <dir>`, then read the failed job's log |
 | Projects v2 | `agit graphql '<query>'` |
+| Anything else (reviews, …) | `agit api <METHOD> <path> --body-file <f>` |
+
+Bodies always come from a file (`--body-file -` reads stdin); an inline `--body` on `agit issue` is refused, because the shell eats backticks. Write the body with your file tool, or `echo … | agit issue comment <n> --body-file -`.
 
 ## Refusals
 

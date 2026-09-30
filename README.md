@@ -27,6 +27,21 @@ agit validate
 agit publish agent/fix-login "fix: login redirect" --paths src/auth --pr "Fix login redirect" --closes 42
 ```
 
+Beyond the write path, the agent's everyday GitHub work has verbs too — JSON on stdout, bodies from files:
+
+```sh
+agit ci wait <sha|branch> [--check ci]            # exit 0 green, 1 red, 2 unknowable
+agit issue read 42                                # includes the body etag `issue edit` needs
+agit issue create --title "…" --body-file b.md [--labels bug]
+agit issue comment 42 --body-file c.md            # `--body-file -` reads stdin
+agit issue close 42 --body-file c.md [--reason not_planned]
+agit issue edit 42 --body-file b.md --etag <etag>
+agit issue assign 42 --login alice
+agit issue label 42 --add bug --remove triage
+```
+
+`agit help` lists every verb.
+
 Full walkthrough: [skills/agit/references/setup.md](skills/agit/references/setup.md). GitHub-side configuration: [docs/github-setup.md](docs/github-setup.md).
 
 ## Pieces
@@ -40,6 +55,7 @@ Full walkthrough: [skills/agit/references/setup.md](skills/agit/references/setup
 | `src/git-hooks.mjs` | runs the repository's git hooks during a publish |
 | `src/codeowners.mjs`, `src/protected.mjs` | CODEOWNERS parsed with GitHub's semantics → the protection policy |
 | `src/maintainer.mjs` | scoped, session-bound grants in `.git/agit/` |
+| `src/github/` | the App client; issue reads/writes (`agit issue`); check verdicts (`agit ci wait`) |
 | `src/hooks/` | Claude Code hooks: credential guard, protected-path guard, PR-write guard, worktree sync |
 | `src/setup/` | `agit setup` (App manifest flow, project bootstrap) and `agit doctor` |
 
