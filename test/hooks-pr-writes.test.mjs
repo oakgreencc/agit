@@ -27,6 +27,11 @@ const cases = [
   [`${A} PUT "/repos/o/r/pulls/$N/merge"`, 1],
   // Auto-merge through GraphQL.
   ['agit graphql \'mutation{enablePullRequestAutoMerge(input:{pullRequestId:"PR_kwABC"}){clientMutationId}}\'', 1],
+  // Merging now, or through the queue, through GraphQL.
+  ['agit graphql \'mutation{mergePullRequest(input:{pullRequestId:"PR_kwABC"}){clientMutationId}}\'', 1],
+  ['agit graphql \'mutation{m: enqueuePullRequest(input:{pullRequestId:"PR_kwABC"}){clientMutationId}}\'', 1],
+  // A longer identifier that merely contains one is not it.
+  ['echo mergePullRequestFoo', 0],
 ]
 for (const [cmd, want] of cases) {
   test(`${want} merge write(s): ${cmd}`, () => assert.equal(findTargets(cmd).length, want))
@@ -38,4 +43,6 @@ test('the denial names the verb, with the PR number when literal', () => {
   assert.match(text, /`merge` scope/)
   assert.match(reasonFor(findTargets(`${A} PUT /repos/o/r/pulls/$N/merge`)), /agit pr merge <n>/)
   assert.match(reasonFor(findTargets('agit graphql "enablePullRequestAutoMerge"')), /auto-merge/)
+  assert.match(reasonFor(findTargets('agit graphql "mergePullRequest"')), /this command merges a PR through GraphQL/)
+  assert.match(reasonFor(findTargets('agit graphql "enqueuePullRequest"')), /queues a PR for merge/)
 })
