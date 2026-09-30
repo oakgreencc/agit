@@ -227,6 +227,12 @@ test('baseHealth: green, red, unknown', async () => {
   assert.equal(await at(null), null)
 })
 
+test('baseHealth: only a real failure is red — cancelled, stale, action_required are unknown', async () => {
+  const at = (conclusion) => baseHealth({ get: getter([[/check-runs/, { check_runs: [{ status: 'completed', conclusion }] }]]), owner: 'o', repo: 'r', base: 'develop', check: 'ci' })
+  for (const c of ['timed_out', 'startup_failure']) assert.equal((await at(c))?.conclusion, c)
+  for (const c of ['cancelled', 'stale', 'action_required']) assert.equal(await at(c), null)
+})
+
 test('rescueFacts: must contain the base head AND be green on it', async () => {
   const facts = (behind, run) =>
     rescueFacts({

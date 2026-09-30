@@ -40,6 +40,7 @@
  * cannot be un-stuck is worse than the breakage it prevents.
  */
 
+import { RUN_FAILED } from './github/checks.mjs'
 import { judge } from './protected.mjs'
 
 /**
@@ -224,7 +225,9 @@ export async function rescueFacts({ get, owner, repo, base, headSha, check }) {
 }
 
 /**
- * Is `base` red? `false` green, `null` unknown, else the failing run.
+ * Is `base` red? `false` green, `null` unknown, else the failing run. Only a
+ * real failure is red: a cancelled, stale or action_required run says
+ * nothing about the code, so it is unknown and does not refuse a merge.
  *
  * @param {{ get: (path: string) => Promise<any>, owner: string, repo: string, base: string, check: string }} input
  */
@@ -232,6 +235,7 @@ export async function baseHealth({ get, owner, repo, base, check }) {
   const run = (await get(checkRunsPath({ owner, repo, ref: base, check })))?.check_runs?.[0]
   if (!run || run.status !== 'completed') return null
   if (['success', 'neutral', 'skipped'].includes(run.conclusion)) return false
+  if (!RUN_FAILED.has(run.conclusion)) return null
   return { conclusion: run.conclusion, url: run.html_url }
 }
 
