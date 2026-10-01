@@ -11,13 +11,15 @@
  *   guard-protected     PreToolUse Bash, Write|Edit|…   CODEOWNERS paths need a grant
  *   guard-pr-writes     PreToolUse Bash                 merges go through `agit pr merge`
  *   sync-worktree       PostToolUse EnterWorktree       fast-forward a new worktree
+ *   session-check       SessionStart                    is raw git bound to the App?
  *
  * THE HOST owns what every hook would otherwise repeat: reading the event
  * JSON on stdin, the failure posture, and the answer's envelope. A hook is a
  * module exporting
  *
  *   event                    'PreToolUse' (a guard: its message DENIES the call)
- *                            or 'PostToolUse' (a notice: its message is shown)
+ *                            or 'PostToolUse' / 'SessionStart' (a notice: its
+ *                            message is shown)
  *   decide(event, { env })   the message, or null for no opinion
  *
  * FAILURE POSTURE: open. An unreadable event, a hook that cannot load, or a
@@ -33,11 +35,12 @@ export const HOOKS = {
   'guard-protected': () => import('./guard-protected.mjs'),
   'guard-pr-writes': () => import('./guard-pr-writes.mjs'),
   'sync-worktree': () => import('./sync-worktree.mjs'),
+  'session-check': () => import('./session-check.mjs'),
 }
 
 /**
  * @typedef {{
- *   event: 'PreToolUse' | 'PostToolUse',
+ *   event: 'PreToolUse' | 'PostToolUse' | 'SessionStart',
  *   decide: (event: any, opts: { env: NodeJS.ProcessEnv }) => string | null | Promise<string | null>,
  * }} Hook
  */
@@ -46,7 +49,7 @@ export const HOOKS = {
 export function envelope(kind, message) {
   return kind === 'PreToolUse'
     ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: message } }
-    : { systemMessage: message, hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: message } }
+    : { systemMessage: message, hookSpecificOutput: { hookEventName: kind, additionalContext: message } }
 }
 
 /**

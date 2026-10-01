@@ -14,8 +14,9 @@
  *            Environment rather than `git config` so it binds agent sessions
  *            only and never changes the human's own git.
  *   hooks    the Claude Code hooks: credentials, PR writes, protected paths,
- *            and the worktree sync. Tracked in the project, so every
- *            contributor's sessions get them.
+ *            the worktree sync, and the session-start check that the env
+ *            above actually reached the session (session-env.mjs). Tracked
+ *            in the project, so every contributor's sessions get them.
  *   perms    `agit` allowed without a prompt (speed: the tool is the gate, a
  *            prompt in front of it is noise); `git push` and `gh` denied (the
  *            two paths that act as the human).
@@ -26,6 +27,9 @@
 
 /** The helper line. `!` makes git run it as a shell command. */
 export const DEFAULT_HELPER = '!agit credential'
+
+/** A credential helper value that is agit's own. */
+export const isAgitHelper = (value) => /agit(\.mjs)?\s+credential/.test(value)
 
 /**
  * @param {{ owners: string[], helper?: string }} input
@@ -102,6 +106,8 @@ export function claudeHooks() {
         hooks: [hook('agit hook sync-worktree', { timeout: 60, statusMessage: 'Syncing worktree to its base' })],
       },
     ],
+    // Raw git's binding is loaded once, at session start: say so when it is wrong.
+    SessionStart: [{ matcher: 'startup|resume', hooks: [hook('agit hook session-check', { timeout: 10 })] }],
   }
 }
 
@@ -164,7 +170,7 @@ export function mergeSettings(existing, { env, hooks, allow = ALLOW, deny = DENY
 export function missingFromSettings(settings) {
   const missing = []
   const pairs = envToPairs(settings?.env)
-  if (!pairs.some(([k, v]) => k === 'credential.https://github.com.helper' && /agit(\.mjs)?\s+credential/.test(v)))
+  if (!pairs.some(([k, v]) => k === 'credential.https://github.com.helper' && isAgitHelper(v)))
     missing.push('env: GIT_CONFIG block naming `agit credential` as the github.com credential helper')
   if (!pairs.some(([k]) => /^url\..*\.insteadOf$/.test(k)))
     missing.push('env: SSH → HTTPS `insteadOf` rewrite (fetches would reach for an SSH key)')
@@ -174,7 +180,7 @@ export function missingFromSettings(settings) {
     .flat()
     .flatMap((g) => /** @type {any} */ (g)?.hooks ?? [])
     .map((h) => String(h?.command ?? ''))
-  for (const name of ['guard-credentials', 'guard-pr-writes', 'guard-protected'])
+  for (const name of ['guard-credentials', 'guard-pr-writes', 'guard-protected', 'session-check'])
     if (!commands.some((c) => c.includes(`hook ${name}`))) missing.push(`hooks: agit hook ${name}`)
   return missing
 }

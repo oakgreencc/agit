@@ -123,6 +123,16 @@ export function githubChecklist({ owner, repo, requiredCheck, slug }) {
   ].join('\n')
 }
 
+/**
+ * Said last whenever `.claude/settings.json` changed: Claude Code reads its
+ * env and hooks once, at session start, so a session already open has none of
+ * what was just written — its raw git still authenticates as the human.
+ */
+export const RESTART_NOTICE = [
+  '! Claude Code sessions already open in this repository are NOT protected by what was just written:',
+  '  they loaded .claude/settings.json (the git env and the hooks) when they started. Restart them.',
+].join('\n')
+
 const USAGE = `usage: agit setup project [--base <branch>] [--validate "<command>"] [--required-check <name>]
                           [--mergeable <a,b | none>] [--codeowner <@handle>] [--hooks-path <dir>]
                           [--no-claude] [--yes]`
@@ -224,6 +234,7 @@ export async function setupProject(argv, deps = {}) {
     } else say(`✓ ${coPath} already owns the protection itself`)
 
     // --- .claude/settings.json ------------------------------------------
+    let settingsWritten = false
     if (!has(argv, '--no-claude')) {
       const settingsPath = join(root, '.claude', 'settings.json')
       const existing = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {}
@@ -234,7 +245,7 @@ export async function setupProject(argv, deps = {}) {
         if (/^url\..*\.insteadOf$/.test(k) && m) owners.add(m[1])
       }
       const next = mergeSettings(existing, { env: gitConfigEnv({ owners: [...owners] }), hooks: claudeHooks() })
-      await writeWithConfirm(prompt, settingsPath, `${JSON.stringify(next, null, 2)}\n`, root)
+      settingsWritten = await writeWithConfirm(prompt, settingsPath, `${JSON.stringify(next, null, 2)}\n`, root)
     }
 
     // --- the base branch's ruleset, on GitHub ---------------------------
@@ -259,6 +270,7 @@ export async function setupProject(argv, deps = {}) {
 
     say('')
     say(githubChecklist({ owner, repo, requiredCheck: requiredCheck || null, slug }))
+    if (settingsWritten) say(`\n${RESTART_NOTICE}`)
   } finally {
     prompt.close()
   }

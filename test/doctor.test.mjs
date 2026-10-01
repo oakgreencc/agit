@@ -1,7 +1,14 @@
 // @ts-check
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { codeownersFindings, nodeFinding, permissionFindings, render, rulesFindings } from '../src/setup/doctor.mjs'
+import {
+  codeownersFindings,
+  nodeFinding,
+  permissionFindings,
+  processFindings,
+  render,
+  rulesFindings,
+} from '../src/setup/doctor.mjs'
 import {
   githubChecklist,
   lineDiff,
@@ -50,6 +57,17 @@ test('codeownersFindings: missing file fails; unowned self-protected paths warn'
     text: '/CODEOWNERS @me\n/.agit.json @me\n/.claude/ @me\n',
   })
   assert.deepEqual(levels(full), ['ok'])
+})
+
+test('processFindings: in a Claude Code session, the session verdict; in a human shell, one ok line', () => {
+  const ssh = { url: 'git@github.com:o/r.git', helpers: [], processEnv: {}, settingsEnv: null }
+  const inSession = processFindings({ ...ssh, claude: true })
+  assert.deepEqual(levels(inSession), ['fail'])
+  assert.match(inSession[0].label, /^this session: raw `git fetch` goes over SSH/)
+  const human = processFindings({ ...ssh, claude: false })
+  assert.deepEqual(levels(human), ['ok'])
+  assert.match(human[0].label, /not a Claude Code session/)
+  assert.match(human[0].label, /SSH/)
 })
 
 test('missingCodeownersLines: only what is not already owned, hooks dir included', () => {

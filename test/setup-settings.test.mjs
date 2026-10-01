@@ -85,7 +85,8 @@ test('mergeSettings: keeps unrelated keys, hooks, permissions and non-agit git c
 
 test('missingFromSettings: names each missing piece', () => {
   const missing = missingFromSettings({})
-  assert.equal(missing.length, 6)
+  assert.equal(missing.length, 7)
   assert.ok(missing.some((m) => m.includes('agit credential')))
   assert.ok(missing.some((m) => m.includes('guard-protected')))
+  assert.ok(missing.some((m) => m.includes('session-check')))
 })
