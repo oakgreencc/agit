@@ -9,6 +9,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { jobFailed, jobLines, runIdFrom, runLine } from '../actions-jobs.mjs'
 import { flag, has, positionals } from '../context.mjs'
+import { PublishError } from '../errors.mjs'
+import { reasonFor } from '../hooks/guard-pr-writes.mjs'
+import { graphqlMergeField, restMergeTarget } from '../raw-merge.mjs'
 import { COMMON_VALUE_FLAGS, contextFrom } from './common.mjs'
 
 /**
@@ -28,7 +31,11 @@ const API_USAGE =
   "  agit api GET '/repos/o/r/issues?state=open' --paginate\n" +
   '  agit api POST /repos/o/r/issues/12/comments --body \'{"body":"…"}\'\n\n' +
   'JSON is pretty-printed on stdout; a text body (job logs) is printed as-is. Use --paginate on any\n' +
-  'list — a first page of 30 otherwise reads as the whole set.'
+  'list — a first page of 30 otherwise reads as the whole set. --raw, --paginate and --out are\n' +
+  'separate output modes: pick one.'
+
+/** The output modes; each replaces the others, so asking for two is a mistake. */
+const OUTPUT_MODES = ['--raw', '--paginate', '--out']
 
 export async function runApi(argv) {
   const [method, path] = positionals(argv, [...COMMON_VALUE_FLAGS, '--body', '--body-file', '--out'])
@@ -36,6 +43,12 @@ export async function runApi(argv) {
     console.log(API_USAGE)
     return method && path ? 0 : 1
   }
+  const modes = OUTPUT_MODES.filter((f) => has(argv, f))
+  if (modes.length > 1) throw new PublishError(`${modes.join(' and ')} cannot be combined — pick one.\n\n${API_USAGE}`)
+  // A merge goes through `agit pr merge`, where the policy is — refused here,
+  // before any client, so a runner without the hook is held to it too.
+  const merge = restMergeTarget({ method, path })
+  if (merge) throw new PublishError(reasonFor([merge], 'call'))
   const { client } = await clientForPath(argv, path)
   const bodyFile = flag(argv, '--body-file')
   const body = bodyFile ? readFileSync(resolve(bodyFile), 'utf8') : flag(argv, '--body')
@@ -83,6 +96,8 @@ export async function runGraphql(argv) {
     )
     return query ? 0 : 1
   }
+  const field = graphqlMergeField(query)
+  if (field) throw new PublishError(reasonFor([{ kind: 'graphql', field }], 'call'))
   const { client } = await clientForPath(argv)
   const varsFile = flag(argv, '--vars-file')
   const varsRaw = varsFile ? readFileSync(resolve(varsFile), 'utf8') : flag(argv, '--vars')

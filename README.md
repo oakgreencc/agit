@@ -4,7 +4,7 @@ Let a coding agent work a GitHub project **as a GitHub App**, with the local `gi
 
 - **Verified commits, not pushes.** `agit publish` builds the tree locally with git, ships only the missing blobs, and has GitHub *create* the commit through the Git Database API. GitHub signs it: it lands **Verified** as the App — never unsigned, never authored as whichever human `user.name` resolved to. Merges too (`agit merge`).
 - **Your git hooks still run.** A publish never runs `git commit` or `git push`, so agit runs `pre-commit`, `prepare-commit-msg`, `commit-msg` and `pre-push` itself, at the equivalent moments, on the exact tree that ships.
-- **CODEOWNERS is the manifest.** Whatever CODEOWNERS assigns an owner is *protected*: the agent's editor hooks refuse the edit, `agit publish` refuses the path, and `agit pr merge` refuses the PR — all before the work, not at review. With "require Code Owner review" on the base branch, GitHub enforces the same list as a hard boundary.
+- **CODEOWNERS is the manifest.** Whatever CODEOWNERS assigns an owner is *protected*: the agent's editor hooks refuse the edit, `agit publish` refuses the path, and `agit pr merge` refuses the PR until a code owner has approved it on GitHub — all before the work, not at review. With "require Code Owner review" on the base branch, GitHub enforces the same list as a hard boundary.
 - **Maintainer mode.** A human lifts part of the protective layer with a scoped (`protected`, `no-verify`, `merge`), session-bound, expiring grant — `! agit maintainer grant "why" --scope protected`. agit stays in the loop; only that gate moves, for that session.
 - **Gates that come from incidents.** Scope (`--paths` or `--all`, never an implied sweep), payload (no `*.log`, no path growing by >512 KiB), displacement (a stale worktree silently reverting work), validated base (a green run about a different base), version floor.
 
@@ -27,6 +27,21 @@ agit validate
 agit publish agent/fix-login "fix: login redirect" --paths src/auth --pr "Fix login redirect" --closes 42
 ```
 
+Beyond the write path, the agent's everyday GitHub work has verbs too — JSON on stdout, bodies from files:
+
+```sh
+agit ci wait <sha|branch> [--check ci]            # exit 0 green, 1 red, 2 unknowable
+agit issue read 42                                # includes the body etag `issue edit` needs
+agit issue create --title "…" --body-file b.md [--labels bug]
+agit issue comment 42 --body-file c.md            # `--body-file -` reads stdin
+agit issue close 42 --body-file c.md [--reason not_planned]
+agit issue edit 42 --body-file b.md --etag <etag>
+agit issue assign 42 --login alice
+agit issue label 42 --add bug --remove triage
+```
+
+`agit help` lists every verb.
+
 Full walkthrough: [skills/agit/references/setup.md](skills/agit/references/setup.md). GitHub-side configuration: [docs/github-setup.md](docs/github-setup.md).
 
 ## Pieces
@@ -40,6 +55,7 @@ Full walkthrough: [skills/agit/references/setup.md](skills/agit/references/setup
 | `src/git-hooks.mjs` | runs the repository's git hooks during a publish |
 | `src/codeowners.mjs`, `src/protected.mjs` | CODEOWNERS parsed with GitHub's semantics → the protection policy |
 | `src/maintainer.mjs` | scoped, session-bound grants in `.git/agit/` |
+| `src/github/` | the App client; issue reads/writes (`agit issue`); check verdicts (`agit ci wait`) |
 | `src/hooks/` | Claude Code hooks: credential guard, protected-path guard, PR-write guard, worktree sync |
 | `src/setup/` | `agit setup` (App manifest flow, project bootstrap) and `agit doctor` |
 

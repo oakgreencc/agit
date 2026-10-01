@@ -16,6 +16,9 @@ _Avoid_: security control, enforcement
 
 **Protected path**:
 A path a human must approve: owned in CODEOWNERS, listed in `protected.extra`, or one of the files that define the protection itself.
+
+**Code-owner approval**:
+A review GitHub itself would count toward merging a Protected path: an individual `@login` from the base's CODEOWNERS approving every such path (on the head, or earlier when the base's ruleset keeps stale approvals), with no owner requesting changes. It lets `agit pr merge` through without a Grant; team-only and `protected.extra` paths have none.
 _Avoid_: control file, owned file
 
 **Impossible path**:

@@ -182,18 +182,18 @@ test('the real PR #403 body lifts exactly the issue it claims', () => {
 // shapes below are the ones a reader understands as quoting rather than doing.
 
 test('a keyword inside a code span is quoted, not intent', () => {
-  const { lift, quoted } = partitionBodyRefs(
+  const { lift, inert } = partitionBodyRefs(
     'The previous commit said `Closes #1045`, which was the half.',
   )
   assert.deepEqual(lift, [])
-  assert.deepEqual(quoted, ['#1045'])
+  assert.deepEqual(inert, ['#1045'])
 })
 
 test('a multi-backtick code span hides a keyword just as well', () => {
   // The spelling you need when the span itself contains a backtick.
-  const { lift, quoted } = partitionBodyRefs('It wrote ``Closes #1045`` verbatim.')
+  const { lift, inert } = partitionBodyRefs('It wrote ``Closes #1045`` verbatim.')
   assert.deepEqual(lift, [])
-  assert.deepEqual(quoted, ['#1045'])
+  assert.deepEqual(inert, ['#1045'])
 })
 
 test('a keyword inside a fenced block is quoted, not intent', () => {
@@ -207,9 +207,9 @@ test('a keyword inside a fenced block is quoted, not intent', () => {
     '',
     'That is the bug.',
   ].join('\n')
-  const { lift, quoted } = partitionBodyRefs(body)
+  const { lift, inert } = partitionBodyRefs(body)
   assert.deepEqual(lift, [])
-  assert.deepEqual(quoted, ['#1090', '#1045'])
+  assert.deepEqual(inert, ['#1090', '#1045'])
 })
 
 test('tilde fences and indented fences count too', () => {
@@ -224,7 +224,7 @@ test('an unterminated fence masks the rest of the body', () => {
   // toward masking is the safe direction — a missed lift is now printed.
   const body = ['```', 'Closes #9', '', 'Closes #10'].join('\n')
   assert.deepEqual(partitionBodyRefs(body).lift, [])
-  assert.deepEqual(partitionBodyRefs(body).quoted, ['#9', '#10'])
+  assert.deepEqual(partitionBodyRefs(body).inert, ['#9', '#10'])
 })
 
 test('a keyword inside a blockquote is quoted, not intent', () => {
@@ -234,23 +234,23 @@ test('a keyword inside a blockquote is quoted, not intent', () => {
     '',
     'Which is what this PR is about.',
   ].join('\n')
-  const { lift, quoted } = partitionBodyRefs(body)
+  const { lift, inert } = partitionBodyRefs(body)
   assert.deepEqual(lift, [])
-  assert.deepEqual(quoted, ['#1045'])
+  assert.deepEqual(inert, ['#1045'])
 })
 
 test('a keyword in plain prose is still lifted', () => {
-  const { lift, quoted } = partitionBodyRefs('Closes #82.')
+  const { lift, inert } = partitionBodyRefs('Closes #82.')
   assert.deepEqual(lift, ['#82'])
-  assert.deepEqual(quoted, [])
+  assert.deepEqual(inert, [])
 })
 
 test('prose around a quoted keyword still lifts its own', () => {
   const body =
     'Closes #1090.\n\nThe earlier commit already said `Closes #1045`, so this is the remainder.'
-  const { lift, quoted } = partitionBodyRefs(body)
+  const { lift, inert } = partitionBodyRefs(body)
   assert.deepEqual(lift, ['#1090'])
-  assert.deepEqual(quoted, ['#1045'])
+  assert.deepEqual(inert, ['#1045'])
 })
 
 test('a code span does not swallow the prose that follows it', () => {
@@ -290,14 +290,14 @@ test('a keyword before a fence does not bind to a number after it', () => {
     '#82 is the tracking issue.',
   ].join('\n')
   assert.deepEqual(parseClosingRefs(body), [])
-  assert.deepEqual(partitionBodyRefs(body), { lift: [], quoted: [] })
+  assert.deepEqual(partitionBodyRefs(body), { lift: [], inert: [] })
 })
 
 test('a keyword before a blockquote does not bind to a number after it', () => {
   const body =
     'Here is what the commit said it closes:\n\n> Closes #1045.\n\n#900 is the real target.'
   assert.deepEqual(partitionBodyRefs(body).lift, [])
-  assert.deepEqual(partitionBodyRefs(body).quoted, ['#1045'])
+  assert.deepEqual(partitionBodyRefs(body).inert, ['#1045'])
 })
 
 test('a keyword before a code span does not bind past it', () => {
@@ -335,10 +335,10 @@ test('an astral character before a code span does not shift the mask', () => {
   // astral char — in one direction it lifts a quoted keyword, in the other it
   // drops a real one.
   const quoted = `${'🤖'.repeat(14)} The commit said \`Closes #1045\`, which was the half.`
-  assert.deepEqual(partitionBodyRefs(quoted), { lift: [], quoted: ['#1045'] })
+  assert.deepEqual(partitionBodyRefs(quoted), { lift: [], inert: ['#1045'] })
 
   const real = '🚀🚀🚀🚀 Run `pnpm run ci` first. Closes #82.'
-  assert.deepEqual(partitionBodyRefs(real), { lift: ['#82'], quoted: [] })
+  assert.deepEqual(partitionBodyRefs(real), { lift: ['#82'], inert: [] })
 })
 
 test('the mandated agent footer does not disturb a body it follows', () => {
@@ -349,21 +349,21 @@ test('the mandated agent footer does not disturb a body it follows', () => {
     '',
     '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
   ].join('\n')
-  assert.deepEqual(partitionBodyRefs(body), { lift: ['#82'], quoted: ['#1045'] })
+  assert.deepEqual(partitionBodyRefs(body), { lift: ['#82'], inert: ['#1045'] })
 })
 
 test('a ref that appears both quoted and in prose is lifted, not skipped', () => {
-  // The partition is disjoint: `quoted` is what was found ONLY in a quoting
+  // The partition is disjoint: `inert` is what was found ONLY in a quoting
   // context, so a ref the author also asserted in prose is not reported lost.
   const body = 'The old commit said `Closes #82`. This one really does: Closes #82.'
-  const { lift, quoted } = partitionBodyRefs(body)
+  const { lift, inert } = partitionBodyRefs(body)
   assert.deepEqual(lift, ['#82'])
-  assert.deepEqual(quoted, [])
+  assert.deepEqual(inert, [])
 })
 
 test('empty and missing bodies partition into nothing', () => {
-  assert.deepEqual(partitionBodyRefs(undefined), { lift: [], quoted: [] })
-  assert.deepEqual(partitionBodyRefs(''), { lift: [], quoted: [] })
+  assert.deepEqual(partitionBodyRefs(undefined), { lift: [], inert: [] })
+  assert.deepEqual(partitionBodyRefs(''), { lift: [], inert: [] })
 })
 
 // --- withClosingTrailers: skipped is reported, --closes always wins ---------
@@ -429,4 +429,52 @@ test('the PR #1096 body no longer closes #1045', () => {
   })
   assert.deepEqual(added, ['#1090'])
   assert.deepEqual(skipped, ['#1045'])
+})
+
+// --- negation: "does not close #N" is not a closing reference ---------------
+
+test('"does not close #N" is skipped, not lifted', () => {
+  const { message, added, skipped } = withClosingTrailers({
+    message: 'fix: a thing',
+    prBody: 'So this PR does not close #1119.',
+  })
+  assert.deepEqual(added, [])
+  assert.deepEqual(skipped, ['#1119'])
+  assert.equal(message, 'fix: a thing')
+})
+
+test('every negator within four words of the keyword makes it inert', () => {
+  for (const body of [
+    'This never fixes #7.',
+    'It no longer resolves #7.',
+    'Ships without a PR that closes #7.',
+    "This doesn't close #7.",
+    'It does not, on its own, close #7.',
+  ])
+    assert.deepEqual(partitionBodyRefs(body), { lift: [], inert: ['#7'] }, body)
+})
+
+test('a negator further back than four words, or in an earlier sentence, does not negate', () => {
+  for (const body of [
+    'This is not the first attempt, and this one finally fixes #7.',
+    'Nothing is broken. Closes #7.',
+    "It isn't pretty!\nCloses #7.",
+    '- does not touch the parser\n- Closes #7',
+  ])
+    assert.deepEqual(partitionBodyRefs(body), { lift: ['#7'], inert: [] }, body)
+})
+
+test('a word that merely contains a negator does not negate', () => {
+  for (const body of ['Notably closes #7.', 'Another fix: fixes #7.', 'Knot tying closes #7.'])
+    assert.deepEqual(partitionBodyRefs(body), { lift: ['#7'], inert: [] }, body)
+})
+
+test('a ref negated in one sentence and asserted in another is lifted', () => {
+  const body = 'The first half did not close #7. This one closes #7.'
+  assert.deepEqual(partitionBodyRefs(body), { lift: ['#7'], inert: [] })
+})
+
+test('negated and quoted refs are reported together, in first-seen order', () => {
+  const body = 'Closes #1. This does not fix #2. The old commit said `Fixes #3`.'
+  assert.deepEqual(partitionBodyRefs(body), { lift: ['#1'], inert: ['#2', '#3'] })
 })

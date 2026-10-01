@@ -202,7 +202,7 @@ const GUIDANCE = `Act on GitHub as the project's App, through agit, instead:
   # uncommitted changes → one Verified commit (+ branch, + PR); the worktree advances
   agit publish <branch> "<message>" --paths a,b --pr "<title>"
 
-  # a completed local merge (git merge → resolve → git commit) → a Verified merge commit
+  # a local merge (git merge --no-commit → resolve → git add) → a Verified merge commit
   agit merge <branch>
 
   # bring the worktree onto a branch head without discarding work
@@ -245,7 +245,7 @@ export const RULES = [
   # uncommitted changes → one Verified commit (+ branch, + PR); the worktree advances
   agit publish <branch> "<message>" --paths a,b --pr "<title>"
 
-  # a completed local merge (git merge → resolve → git commit) → Verified merge commit
+  # a local merge (git merge --no-commit → resolve → git add) → Verified merge commit
   agit merge <branch>
 
   # bring the worktree onto the branch head without discarding work
@@ -267,8 +267,9 @@ To publish work, use the App — it needs no local commit at all:
 
   agit publish <branch> "<message>" --paths <a,b> --pr "<title>"
 
-A local commit is legitimate in a session with signing off (a merge to publish with
-\`agit merge\`). A session that SHOULD have signing off is missing the \`env\` block
+A merge needs no local commit either: \`git merge --no-commit\`, resolve, \`git add\`,
+then \`agit merge <branch>\`. A local commit is legitimate in a session with signing
+off (a committed merge, work parked mid-session). A session that SHOULD have signing off is missing the \`env\` block
 \`agit setup project\` writes into .claude/settings.json; report that, or run
 \`agit doctor\`.`,
   },

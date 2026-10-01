@@ -14,7 +14,7 @@ import {
   resolveBranch,
   worktreeTree,
 } from '../src/publish/publish.mjs'
-import { createClient } from '../src/github/app.mjs'
+import { createClient, SERVER_ERROR_RETRIES } from '../src/github/app.mjs'
 import { clientOver } from './fixtures.mjs'
 
 const sha = (c) => c.repeat(40)
@@ -38,6 +38,8 @@ function fakeClient(routes) {
     calls.push({ method, path, body })
     const handler = routes[`${method} ${path}`]
     if (handler === undefined) throw new Error(`${path}: 404 {"message":"Not Found"}`)
+    // A thrown `<path>: <status> …` becomes that HTTP answer, so the real
+    // client attaches `err.status` — which the 5xx retry reads, and nothing else.
     if (typeof handler === 'number') throw new Error(`${path}: ${handler} {"message":"nope"}`)
     return typeof handler === 'function' ? handler(body) : handler
   })
@@ -646,7 +648,246 @@ test('localMerge recognises a fast-forward and refuses an octopus', () => {
   )
 })
 
+// The merge state `git merge --no-commit` leaves behind: MERGE_HEAD, MERGE_MSG
+// with its `# Conflicts:` block, and the resolved index.
+const MERGE_MSG_PATH = '/wt/.git/MERGE_MSG'
+const MERGE_MSG_RAW = "Merge remote-tracking branch 'origin/develop' into agent/x\n\n# Conflicts:\n#\ta.txt\n"
+const MERGE_MSG_CLEAN = "Merge remote-tracking branch 'origin/develop' into agent/x"
+const uncommittedMerge = (extra = {}) => ({
+  'rev-parse -q --verify MERGE_HEAD': `${MERGED}\n`,
+  'rev-parse HEAD': `${HEAD}\n`,
+  'diff --name-only --diff-filter=U -z': '',
+  'write-tree': `${NEW_TREE}\n`,
+  'rev-parse --path-format=absolute --git-path MERGE_MSG': `${MERGE_MSG_PATH}\n`,
+  'stripspace --strip-comments': (_args, opts) =>
+    opts.input === MERGE_MSG_RAW ? `${MERGE_MSG_CLEAN}\n` : `unexpected stripspace input: ${opts.input}`,
+  ...extra,
+})
+const readMergeMsg = (p) => {
+  assert.equal(p, MERGE_MSG_PATH)
+  return MERGE_MSG_RAW
+}
+
+test('localMerge reads an uncommitted merge (git merge --no-commit): parents [HEAD, MERGE_HEAD], the index tree, MERGE_MSG without its comments', () => {
+  const git = fakeGit(uncommittedMerge())
+  assert.deepEqual(localMerge({ git, branchHead: HEAD, readFile: readMergeMsg }), {
+    kind: 'merge',
+    tree: NEW_TREE,
+    parents: [HEAD, MERGED],
+    message: MERGE_MSG_CLEAN,
+    uncommitted: true,
+  })
+  // The real index, not a throwaway one: the resolved index IS the merge.
+  assert.equal(git.ran('write-tree')[0].env, null)
+  // No local commit was read, made or needed.
+  assert.equal(git.ran('rev-list').length, 0)
+  assert.equal(git.ran('commit').length, 0)
+})
+
+test('localMerge runs the pre-commit hook on the real index of a merge in progress, before its tree is written', () => {
+  const order = []
+  const git = fakeGit(
+    uncommittedMerge({
+      'write-tree': () => {
+        order.push('write-tree')
+        return `${NEW_TREE}\n`
+      },
+    }),
+  )
+  localMerge({
+    git,
+    branchHead: HEAD,
+    readFile: readMergeMsg,
+    beforeWrite: (env) => {
+      // No GIT_INDEX_FILE: the hook sees, and may re-stage into, the real index.
+      assert.deepEqual(env, {})
+      order.push('pre-commit')
+    },
+  })
+  assert.deepEqual(order, ['pre-commit', 'write-tree'])
+})
+
+test('localMerge refuses an uncommitted merge whose index still has unmerged paths, naming them — before any hook runs', () => {
+  const git = fakeGit(uncommittedMerge({ 'diff --name-only --diff-filter=U -z': 'a.txt\u0000d/c.txt\u0000' }))
+  assert.throws(
+    () =>
+      localMerge({
+        git,
+        branchHead: HEAD,
+        readFile: readMergeMsg,
+        beforeWrite: () => assert.fail('pre-commit ran on a conflicted index'),
+      }),
+    (err) =>
+      err instanceof PublishError &&
+      /2 unmerged paths/.test(err.message) &&
+      err.message.includes('  a.txt\n  d/c.txt') &&
+      /git add/.test(err.message),
+  )
+  assert.equal(git.ran('write-tree').length, 0)
+})
+
+test('localMerge refuses an uncommitted merge started on a stale worktree', () => {
+  const git = fakeGit(uncommittedMerge({ 'rev-parse HEAD': `${sha('f')}\n` }))
+  assert.throws(
+    () => localMerge({ git, branchHead: HEAD, readFile: readMergeMsg }),
+    (err) =>
+      err instanceof PublishError &&
+      /behind the branch/.test(err.message) &&
+      /git merge --abort/.test(err.message) &&
+      /git merge --no-commit/.test(err.message),
+  )
+})
+
+const uncommittedMergeGit = () =>
+  fakeGit(
+    uncommittedMerge({
+      [`ls-tree -r -z ${HEAD}`]: `100644 blob ${BLOB_OLD}\ta.txt\u0000`,
+      [`ls-tree -r -z ${MERGED}`]: `100644 blob ${BLOB_THEIRS}\ta.txt\u0000`,
+      [`diff-tree -r --no-renames -z ${HEAD} ${NEW_TREE}`]: `:100644 100644 ${BLOB_OLD} ${BLOB_NEW} M\u0000a.txt\u0000`,
+      [`diff-tree -r --no-renames -z ${MERGED} ${NEW_TREE}`]: `:100644 100644 ${BLOB_THEIRS} ${BLOB_NEW} M\u0000a.txt\u0000:100644 000000 ${BLOB_OLD} ${sha('0')} D\u0000b.txt\u0000`,
+      [`cat-file blob ${BLOB_NEW}`]: Buffer.from('resolved'),
+    }),
+  )
+const uncommittedMergeClient = () =>
+  fakeClient({
+    [`GET /repos/o/r/git/commits/${MERGED}`]: { sha: MERGED, tree: { sha: sha('7') } },
+    'POST /repos/o/r/git/trees': { sha: NEW_TREE },
+    'POST /repos/o/r/git/commits': commitResponse(),
+    'PATCH /repos/o/r/git/refs/heads/agent/x': {},
+  })
+
+// The resolved tree is 1 path from HEAD and 2 from MERGED: nearer the first
+// parent, so the tree request builds on the head.
+test('publishMerge publishes an uncommitted merge as a two-parent commit with the stripped MERGE_MSG, built on the nearer head', async () => {
+  const git = uncommittedMergeGit()
+  const client = uncommittedMergeClient()
+  const reports = []
+  const out = await publishMerge({
+    git,
+    client,
+    owner: 'o',
+    repo: 'r',
+    branch: 'agent/x',
+    head: { sha: HEAD, tree: HEAD_TREE },
+    readFile: readMergeMsg,
+    report: (line) => reports.push(line),
+  })
+  assert.equal(out.kind, 'merge')
+  const commit = client.calls.find((c) => c.path.endsWith('/git/commits') && c.method === 'POST')
+  assert.deepEqual(commit.body, { message: MERGE_MSG_CLEAN, tree: NEW_TREE, parents: [HEAD, MERGED] })
+  // Built on the head, carrying only the path that differs from it.
+  const tree = client.calls.find((c) => c.path.endsWith('/git/trees'))
+  assert.deepEqual(tree.body, {
+    base_tree: HEAD_TREE,
+    tree: [{ path: 'a.txt', mode: '100644', type: 'blob', content: 'resolved' }],
+  })
+  assert.ok(
+    !reports.some((l) => l.startsWith('building the merge tree on the merged-in parent')),
+    reports.join('\n'),
+  )
+})
+
+test('publishMerge of an uncommitted merge runs pre-commit on the real index, commit-msg on MERGE_MSG, and shows pre-push a twin', async () => {
+  const git = uncommittedMergeGit()
+  const client = uncommittedMergeClient()
+  const seen = []
+  const out = await publishMerge({
+    git,
+    client,
+    owner: 'o',
+    repo: 'r',
+    branch: 'agent/x',
+    head: { sha: HEAD, tree: HEAD_TREE },
+    readFile: readMergeMsg,
+    hooks: {
+      preCommit: (env) => seen.push(['pre-commit', env, git.ran('write-tree').length]),
+      commitMessage: (m) => {
+        seen.push(['commit-msg', m])
+        return `${m}\n\nReviewed-by: hook`
+      },
+      prePush: (commit) => void seen.push(['pre-push', commit, client.calls.length]),
+    },
+  })
+  assert.equal(out.kind, 'merge')
+  assert.deepEqual(seen, [
+    ['pre-commit', {}, 0], // before the index's tree was written
+    ['commit-msg', MERGE_MSG_CLEAN],
+    // No local commit to show: a twin's parts, and nothing sent to GitHub yet.
+    ['pre-push', { tree: NEW_TREE, parents: [HEAD, MERGED], message: `${MERGE_MSG_CLEAN}\n\nReviewed-by: hook` }, 0],
+  ])
+  const commit = client.calls.find((c) => c.path.endsWith('/git/commits') && c.method === 'POST')
+  assert.equal(commit.body.message, `${MERGE_MSG_CLEAN}\n\nReviewed-by: hook`)
+})
+
+test('publishMerge of a committed merge leaves its message to the local commit, and shows pre-push that commit', async () => {
+  const git = staleMerge()
+  const client = fakeClient(mergeRoutes())
+  const seen = []
+  await merge(git, client, [], {
+    hooks: {
+      preCommit: () => seen.push('pre-commit'),
+      commitMessage: () => assert.fail('commit-msg ran on a committed merge'),
+      prePush: (commit) => void seen.push(commit),
+    },
+  })
+  assert.deepEqual(seen, [
+    { tree: NEW_TREE, parents: [HEAD, MERGED], message: "Merge branch 'develop' into agent/x", sha: sha('e') },
+  ])
+})
+
 // --- advance -----------------------------------------------------------------------
+
+test('advance after an uncommitted merge publish: quits the merge state (never reset --merge), then moves HEAD', () => {
+  const git = fakeGit({
+    'rev-parse HEAD': `${HEAD}\n`,
+    'rev-parse -q --verify MERGE_HEAD': `${MERGED}\n`,
+    [`merge-base --is-ancestor ${MERGED} ${sha('e')}`]: '',
+    [`merge-base --is-ancestor ${HEAD} ${sha('e')}`]: '',
+    'status --porcelain -uall -z': 'M  a.txt\u0000A  theirs.txt\u0000',
+    [`diff --name-only -z ${HEAD} ${sha('e')}`]: 'a.txt\u0000theirs.txt\u0000',
+    [`ls-tree -r -z ${sha('e')} -- a.txt theirs.txt`]: `100644 blob ${BLOB_NEW}\ta.txt\u0000100644 blob ${BLOB_THEIRS}\ttheirs.txt\u0000`,
+    'hash-object -- a.txt': `${BLOB_NEW}\n`,
+    'hash-object -- theirs.txt': `${BLOB_THEIRS}\n`,
+    'merge --quit': '',
+    'reset --soft': '',
+    'update-index': '',
+  })
+  const out = advance({ git, target: sha('e') })
+  assert.equal(out.advanced, true, out.reason)
+  assertNoDestructiveGit(git)
+  const seq = git.calls
+    .map((c) => c.args.join(' '))
+    .filter((s) => /^(merge --|reset|restore|update-index)/.test(s))
+  assert.deepEqual(seq, ['merge --quit', `reset --soft ${sha('e')}`, 'update-index --add --remove -- a.txt theirs.txt'])
+})
+
+test('advance does not quit a merge in progress that the target does not contain', () => {
+  const git = fakeGit({
+    'rev-parse HEAD': `${HEAD}\n`,
+    'rev-parse -q --verify MERGE_HEAD': `${MERGED}\n`,
+    [`merge-base --is-ancestor ${MERGED} ${sha('e')}`]: new Error('exit 1'),
+  })
+  const out = advance({ git, target: sha('e') })
+  assert.equal(out.advanced, false)
+  assert.match(String(out.reason), /merge in progress/)
+  assert.equal(git.ran('merge').filter((c) => c.args[0] === 'merge').length, 0)
+  assert.equal(git.ran('reset').length, 0)
+})
+
+test('advance names `git merge --no-commit` for a collision — resolve and `git add`, no local commit', () => {
+  const git = fakeGit({
+    'rev-parse HEAD': `${HEAD}\n`,
+    [`merge-base --is-ancestor ${HEAD} ${sha('e')}`]: '',
+    'status --porcelain -uall -z': ' M a.txt\u0000',
+    [`diff --name-only -z ${HEAD} ${sha('e')}`]: 'a.txt\u0000',
+    [`ls-tree -r -z ${sha('e')} -- a.txt`]: `100644 blob ${BLOB_THEIRS}\ta.txt\u0000`,
+    'hash-object -- a.txt': `${BLOB_NEW}\n`,
+  })
+  assert.throws(
+    () => advance({ git, target: sha('e') }),
+    (err) => err instanceof PublishError && err.message.includes(`git merge --no-commit ${sha('e')}`) && /git add/.test(err.message),
+  )
+})
 
 const NEVER = ['reset --hard', 'checkout --', 'checkout -- ', 'clean']
 const assertNoDestructiveGit = (git) => {
@@ -894,6 +1135,8 @@ test('publishMerge: the resolved tree lands as a two-parent commit, parents [hea
     [`ls-tree -r -z ${HEAD}`]: `100644 blob ${BLOB_OLD}\ta.txt\u0000`,
     [`ls-tree -r -z ${MERGED}`]: `100644 blob ${BLOB_THEIRS}\ttheirs.txt\u0000`,
     [`diff-tree -r --no-renames -z ${HEAD} ${NEW_TREE}`]: `:100644 100644 ${BLOB_OLD} ${BLOB_NEW} M\u0000a.txt\u0000:000000 100644 ${sha('0')} ${BLOB_THEIRS} A\u0000theirs.txt\u0000`,
+    // Equally far from the merged-in side: the tie keeps the head.
+    [`diff-tree -r --no-renames -z ${MERGED} ${NEW_TREE}`]: `:000000 100644 ${sha('0')} ${BLOB_NEW} A\u0000a.txt\u0000:100644 100644 ${BLOB_OLD} ${BLOB_THEIRS} M\u0000theirs.txt\u0000`,
     [`cat-file blob ${BLOB_NEW}`]: Buffer.from('resolved'),
   })
   const client = fakeClient({
@@ -923,6 +1166,164 @@ test('publishMerge: the resolved tree lands as a two-parent commit, parents [hea
     parents: [HEAD, MERGED],
   })
   assert.deepEqual(client.calls.at(-1).body, { sha: sha('e'), force: false })
+  const tree = client.calls.find((c) => c.path.endsWith('/git/trees'))
+  assert.equal(tree.body.base_tree, HEAD_TREE)
+})
+
+/**
+ * A merge of a long-stale branch: the resolved tree is 3 paths from the head
+ * but 1 from the merged-in side.
+ */
+const staleMerge = (over = {}) =>
+  fakeGit({
+    'rev-list --parents -n 1 HEAD': `${sha('e')} ${HEAD} ${MERGED}\n`,
+    'rev-parse HEAD^{tree}': `${NEW_TREE}\n`,
+    'log -1 --format=%B HEAD': "Merge branch 'develop' into agent/x\n",
+    [`ls-tree -r -z ${HEAD}`]: `100644 blob ${BLOB_OLD}\ta.txt\u0000`,
+    [`ls-tree -r -z ${MERGED}`]: `100644 blob ${BLOB_THEIRS}\ttheirs.txt\u0000`,
+    [`diff-tree -r --no-renames -z ${HEAD} ${NEW_TREE}`]:
+      `:100644 100644 ${BLOB_OLD} ${BLOB_NEW} M\u0000a.txt\u0000` +
+      `:000000 100644 ${sha('0')} ${BLOB_THEIRS} A\u0000theirs.txt\u0000` +
+      `:000000 100644 ${sha('0')} ${BLOB_THEIRS} A\u0000theirs2.txt\u0000`,
+    [`diff-tree -r --no-renames -z ${MERGED} ${NEW_TREE}`]: `:100644 100644 ${BLOB_OLD} ${BLOB_NEW} M\u0000a.txt\u0000`,
+    [`cat-file blob ${BLOB_NEW}`]: Buffer.from('resolved'),
+    ...over,
+  })
+const MERGED_TREE = sha('7')
+const mergeRoutes = (over = {}) => ({
+  [`GET /repos/o/r/git/commits/${MERGED}`]: { sha: MERGED, tree: { sha: MERGED_TREE } },
+  'POST /repos/o/r/git/trees': { sha: NEW_TREE },
+  'POST /repos/o/r/git/commits': commitResponse(),
+  'PATCH /repos/o/r/git/refs/heads/agent/x': {},
+  ...over,
+})
+const merge = (git, client, reports = [], extra = {}) =>
+  publishMerge({
+    git,
+    client,
+    owner: 'o',
+    repo: 'r',
+    branch: 'agent/x',
+    head: { sha: HEAD, tree: HEAD_TREE },
+    report: (line) => reports.push(line),
+    sleep: async () => {},
+    pace: 0,
+    ...extra,
+  })
+
+test('publishMerge builds the tree on the merged-in parent when the merge is nearer to it — parents unchanged', async () => {
+  const git = staleMerge()
+  const client = fakeClient(mergeRoutes())
+  const reports = []
+  const out = await merge(git, client, reports)
+  const tree = client.calls.find((c) => c.path.endsWith('/git/trees'))
+  assert.deepEqual(tree.body, {
+    base_tree: MERGED_TREE,
+    tree: [{ path: 'a.txt', mode: '100644', type: 'blob', content: 'resolved' }],
+  })
+  assert.ok(
+    reports.includes('building the merge tree on the merged-in parent (1 path, vs 3 from the head)'),
+    reports.join('\n'),
+  )
+  const commit = client.calls.find((c) => c.path.endsWith('/git/commits') && c.method === 'POST')
+  assert.deepEqual(commit.body.parents, [HEAD, MERGED])
+  assert.equal(commit.body.tree, NEW_TREE)
+  assert.equal(out.kind, 'merge')
+  assert.deepEqual(out.shipped.uploaded, ['a.txt'])
+})
+
+test('publishMerge ships nothing when the resolved tree is the merged-in tree', async () => {
+  const git = staleMerge({ 'rev-parse HEAD^{tree}': `${MERGED_TREE}\n` })
+  const client = fakeClient(mergeRoutes())
+  const out = await merge(git, client)
+  assert.equal(
+    client.calls.some((c) => c.path.endsWith('/git/trees') || c.path.endsWith('/git/blobs')),
+    false,
+  )
+  assert.equal(git.ran('diff-tree').length, 0)
+  const commit = client.calls.find((c) => c.path.endsWith('/git/commits') && c.method === 'POST')
+  assert.deepEqual(commit.body, {
+    message: "Merge branch 'develop' into agent/x",
+    tree: MERGED_TREE,
+    parents: [HEAD, MERGED],
+  })
+  assert.equal(out.kind, 'merge')
+})
+
+// --- 5xx: repeated for content-addressed writes only --------------------------------
+
+test('a POST git/trees that answers 502 once is repeated, reported, and the merge lands', async () => {
+  let treePosts = 0
+  const git = staleMerge()
+  const client = fakeClient(
+    mergeRoutes({
+      'POST /repos/o/r/git/trees': () => {
+        if (++treePosts === 1) throw new Error('/repos/o/r/git/trees: 502 {"message":"Server Error"}')
+        return { sha: NEW_TREE }
+      },
+    }),
+  )
+  const reports = []
+  const out = await merge(git, client, reports)
+  assert.equal(treePosts, 2)
+  assert.equal(out.commit.sha, sha('e'))
+  assert.equal(
+    reports.filter((r) => /^server error \(502\) on POST \/repos\/o\/r\/git\/trees/.test(r)).length,
+    1,
+  )
+})
+
+test('a POST git/blobs that answers 503 once is repeated and the blob checked', async () => {
+  let blobPosts = 0
+  const git = staleMerge({ [`cat-file blob ${BLOB_NEW}`]: Buffer.from([0x00, 0x01]) })
+  const client = fakeClient(
+    mergeRoutes({
+      'POST /repos/o/r/git/blobs': () => {
+        if (++blobPosts === 1) throw new Error('/repos/o/r/git/blobs: 503 {"message":"x"}')
+        return { sha: BLOB_NEW }
+      },
+    }),
+  )
+  await merge(git, client)
+  assert.equal(blobPosts, 2)
+})
+
+test('a POST git/commits that answers 502 is never repeated — the error surfaces, the ref is untouched', async () => {
+  const git = staleMerge()
+  const client = fakeClient(mergeRoutes({ 'POST /repos/o/r/git/commits': 502 }))
+  await assert.rejects(merge(git, client), /git\/commits: 502 /)
+  assert.equal(client.calls.filter((c) => c.path.endsWith('/git/commits') && c.method === 'POST').length, 1)
+  assert.equal(
+    client.calls.some((c) => c.method === 'PATCH'),
+    false,
+  )
+})
+
+test('a 422 on a tree write is never repeated; a 5xx that persists is surfaced after the retries', async () => {
+  let posts = 0
+  const refused = fakeClient(
+    mergeRoutes({
+      'POST /repos/o/r/git/trees': () => {
+        posts++
+        throw new Error('/repos/o/r/git/trees: 422 {"message":"bad"}')
+      },
+    }),
+  )
+  await assert.rejects(merge(staleMerge(), refused), /git\/trees: 422 /)
+  assert.equal(posts, 1)
+
+  posts = 0
+  const down = fakeClient(
+    mergeRoutes({
+      'POST /repos/o/r/git/trees': () => {
+        posts++
+        throw new Error('/repos/o/r/git/trees: 502 {"message":"x"}')
+      },
+    }),
+  )
+  await assert.rejects(merge(staleMerge(), down), /git\/trees: 502 /)
+  assert.equal(posts, SERVER_ERROR_RETRIES + 1)
+  assert.equal(down.calls.some((c) => c.path.endsWith('/git/commits')), false)
 })
 
 test('publishMerge refuses a merged-in commit GitHub does not have', async () => {

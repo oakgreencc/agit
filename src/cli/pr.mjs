@@ -8,7 +8,8 @@
  * `merge` applies src/pr-policy.mjs before it asks GitHub to merge; the raw
  * API forms are refused by `agit hook guard-pr-writes` so this is the one way
  * in. `--auto` arms auto-merge instead — a deferred merge is still a merge,
- * and it is judged the same way, at arm time. (Its green therefore ages until
+ * and it is judged the same way, at arm time: arming it before a code owner's
+ * approval exists is refused like the merge. (Its green therefore ages until
  * the merge lands; the base's own post-merge CI is the backstop.)
  *
  * `update` brings a PR up to date with its base (`update-branch`). It lands
@@ -19,6 +20,7 @@
  * nothing.
  */
 
+import { codeOwnerApproval, stalePolicy, strict } from '../code-owner-approval.mjs'
 import { mergeableBases } from '../config.mjs'
 import { flag, has, positionals } from '../context.mjs'
 import { allows, grantAdvice } from '../maintainer.mjs'
@@ -50,6 +52,25 @@ async function fileAt(client, owner, repo, path, ref) {
  */
 export async function policyOnBase({ client, owner, repo, base }) {
   return policyFrom(await snapshot((p) => fileAt(client, owner, repo, p, base)))
+}
+
+/**
+ * Has a code owner approved `paths` in a way GitHub counts? CODEOWNERS is the
+ * base's (from `policyOnBase`), never the worktree's. The stale-approval rule
+ * is the base's ruleset, read live; unreadable is the strict, same-head rule.
+ *
+ * @param {{ client: import('../github/app.mjs').Client, owner: string, repo: string, base: string, number: number, head: string, paths: string[], codeowners: string }} input
+ */
+export async function approvalOnBase({ client, owner, repo, base, number, head, paths, codeowners }) {
+  let policy
+  try {
+    policy = stalePolicy(await client.paginate(`/repos/${owner}/${repo}/rules/branches/${encodeURIComponent(base)}?per_page=100`), base)
+  } catch (err) {
+    const s = strict(base)
+    policy = { ...s, basis: `${s.basis} (${/** @type {Error} */ (err).message})` }
+  }
+  const reviews = await client.paginate(`/repos/${owner}/${repo}/pulls/${number}/reviews?per_page=100`)
+  return codeOwnerApproval({ paths, codeowners, head, reviews, policy })
 }
 
 /**
@@ -97,6 +118,7 @@ export async function run(argv, { client: given } = {}) {
       files: async () => (await client.paginate(`/repos/${owner}/${repo}/pulls/${number}/files?per_page=100`)).map((f) => f.filename),
       baseRed: check ? () => baseHealth({ get, owner, repo, base, check }) : undefined,
       rescue: check ? () => rescueFacts({ get, owner, repo, base, headSha: pr.head.sha, check }) : undefined,
+      approval: (paths) => approvalOnBase({ client, owner, repo, base, number, head: pr.head.sha, paths, codeowners: policy.codeowners.text }),
     },
   })
 

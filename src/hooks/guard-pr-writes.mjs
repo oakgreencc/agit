@@ -8,8 +8,11 @@
  * the project lets agents merge into, the diff must touch nothing CODEOWNERS
  * protects, and the base must not be red (unless this PR is the fix). A merge
  * sent any other way — `agit api PUT …/pulls/<n>/merge`, `curl`, the GraphQL
- * `enablePullRequestAutoMerge` mutation — would walk straight past all of it.
- * So this hook refuses those forms and names the verb.
+ * `mergePullRequest` / `enablePullRequestAutoMerge` / `enqueuePullRequest`
+ * mutations — would walk straight past all of it. So this hook refuses those
+ * forms and names the verb. (`agit api` / `agit graphql` also refuse them
+ * themselves — see raw-merge.mjs — so runners without this hook are covered;
+ * the hook still catches `curl` and the like.)
  *
  * WHY A HOOK AND NOT A PERMISSION RULE. `permissions.deny` matches a command
  * string, and a merge can be spelled many ways; this matches the ENDPOINT
@@ -31,11 +34,16 @@
  * mentions one, which is a denial with a readable reason.
  */
 
+import { MERGE_MUTATIONS } from '../raw-merge.mjs'
+
 /** A merge expressed as a REST path. The number is loose so `$N` is caught too. */
 const PR_MERGE = /\/repos\/([^/\s'"`]+)\/([^/\s'"`]+)\/pulls\/([^/\s'"`]+)\/merge\b/g
 
-/** The GraphQL mutation that arms a merge for later. */
-const AUTO_MERGE = /enablePullRequestAutoMerge/
+/**
+ * The GraphQL mutations that merge a PR, now or later. Matched as bare words,
+ * not parsed: command text is shell-quoted, so a mention counts as a merge.
+ */
+const GRAPHQL_MERGE = new RegExp(`\\b(${MERGE_MUTATIONS.join('|')})\\b`)
 
 /**
  * The HTTP method a path match belongs to: the LAST method token in a short
@@ -51,7 +59,7 @@ function methodFor(command, index) {
  * Every merge write in a command that bypasses `agit pr`. Empty: no opinion.
  *
  * @param {string} command
- * @returns {{ kind: 'rest' | 'graphql', repo: string | null, number: string | null }[]}
+ * @returns {{ kind: 'rest' | 'graphql', repo: string | null, number: string | null, field?: string }[]}
  */
 export function findTargets(command) {
   const targets = []
@@ -59,17 +67,33 @@ export function findTargets(command) {
     if (methodFor(command, m.index) === 'GET') continue // reading merge state
     targets.push({ kind: 'rest', repo: `${m[1]}/${m[2]}`, number: m[3] })
   }
-  if (AUTO_MERGE.test(command)) targets.push({ kind: 'graphql', repo: null, number: null })
+  const field = GRAPHQL_MERGE.exec(command)?.[1]
+  if (field) targets.push({ kind: 'graphql', repo: null, number: null, field })
   return /** @type {any} */ (targets)
 }
 
-/** The denial text for a set of targets. */
-export function reasonFor(targets) {
+/** What each GraphQL merge mutation does, for the denial. */
+const GRAPHQL_HOW = {
+  mergePullRequest: 'merges a PR through GraphQL',
+  enablePullRequestAutoMerge: 'arms auto-merge through GraphQL',
+  enqueuePullRequest: 'queues a PR for merge through GraphQL',
+}
+
+/**
+ * The denial text for a set of targets.
+ *
+ * @param {{ kind: string, repo?: string | null, number?: string | null, field?: string }[]} targets
+ * @param {string} [subject]  what is refused — the hook's "command", the CLI's "call"
+ */
+export function reasonFor(targets, subject = 'command') {
   const t = targets[0]
   const n = t.number && /^\d+$/.test(t.number) ? t.number : '<n>'
-  const how = t.kind === 'graphql' ? 'arms auto-merge through GraphQL' : `merges ${t.repo}#${t.number} through the REST API`
+  const how =
+    t.kind === 'graphql'
+      ? (GRAPHQL_HOW[t.field ?? ''] ?? GRAPHQL_HOW.enablePullRequestAutoMerge)
+      : `merges ${t.repo}#${t.number} through the REST API`
   return (
-    `Blocked: this command ${how}, which skips the project's merge policy.\n\n` +
+    `Blocked: this ${subject} ${how}, which skips the project's merge policy.\n\n` +
     'Merge through agit, which checks the base, the protected paths in the diff, and\n' +
     'whether the base is red — and says why when it refuses:\n\n' +
     `    agit pr merge ${n}             # [--method merge|squash|rebase]\n` +

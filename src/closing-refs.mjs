@@ -58,20 +58,74 @@ const CLOSING = new RegExp(
  * @returns {string[]} refs such as `#82` or `acme/wiki#48`, deduplicated
  */
 export function parseClosingRefs(text) {
+  return dedupe(scanClosing(text).map((m) => m.ref))
+}
+
+/**
+ * Every closing match in `text`, with where its keyword starts.
+ *
+ * @param {string} [text]
+ * @returns {{ ref: string, index: number }[]}
+ */
+function scanClosing(text) {
   if (!text) return []
+  return [...text.matchAll(CLOSING)].map((m) => ({ ref: m[1], index: /** @type {number} */ (m.index) }))
+}
+
+/**
+ * Matching is case-insensitive, so two spellings of the same cross-repo ref
+ * differ only in the owner segment's case. Dedupe on a lowercased key but emit
+ * the first spelling seen, so the owner/repo half survives as written.
+ *
+ * @param {string[]} refs
+ * @returns {string[]}
+ */
+function dedupe(refs) {
   const seen = new Set()
-  const refs = []
-  for (const m of text.matchAll(CLOSING)) {
-    // Matching is case-insensitive, so two spellings of the same cross-repo ref
-    // differ only in the owner segment's case. Dedupe on a lowercased key but
-    // emit the first spelling seen, so the owner/repo half survives as written.
-    const ref = m[1]
+  return refs.filter((ref) => {
     const key = ref.toLowerCase()
-    if (seen.has(key)) continue
+    if (seen.has(key)) return false
     seen.add(key)
-    refs.push(ref)
-  }
-  return refs
+    return true
+  })
+}
+
+/**
+ * Where a sentence, a paragraph or a list item starts: sentence punctuation
+ * followed by whitespace, a blank line, or a line break before a list marker
+ * or heading. A bare line break is NOT a boundary — PR bodies are often
+ * hard-wrapped, and "does not\nclose #7" is one sentence.
+ */
+const BOUNDARY = /[.!?](?=\s|$)|\n[ \t]*\n|\n(?=[ \t]*(?:[-*+]|\d+[.)]|#+)[ \t])/g
+
+/** A word that negates what follows it. `n't` covers every contraction. */
+const NEGATOR = /^(?:not|never|without)$|n['’]t$/
+
+/** How far back, in words, a negator still reaches the keyword. */
+const NEGATION_REACH = 4
+
+/**
+ * Whether the keyword at `index` is negated: `not`, `never`, `no longer`,
+ * `without` or an `n't` contraction within {@link NEGATION_REACH} words before
+ * it, in the same sentence.
+ *
+ * "So this PR does not close #1119." is prose ABOUT an issue, and lifting it
+ * into the commit as `Closes #1119.` is the one outcome worse than doing
+ * nothing: it closes a live issue on the next promotion with no trace. A
+ * heuristic, deliberately narrow: a false negative here is PRINTED (the ref
+ * lands in `inert`, and `agit publish` names `--closes` as the fix), while a
+ * false positive closes an issue silently.
+ *
+ * @param {string} text
+ * @param {number} index
+ */
+function negated(text, index) {
+  let start = 0
+  for (const m of text.slice(0, index).matchAll(BOUNDARY)) start = /** @type {number} */ (m.index) + m[0].length
+  const words = (text.slice(start, index).match(/[A-Za-z]+(?:['’][A-Za-z]+)?/g) ?? [])
+    .slice(-NEGATION_REACH)
+    .map((w) => w.toLowerCase())
+  return words.some((w, i) => NEGATOR.test(w) || (w === 'no' && words[i + 1] === 'longer'))
 }
 
 /**
@@ -91,7 +145,7 @@ export function parseClosingRefs(text) {
  *     #82 is the tracking issue.
  *
  * — which is worse than the bug this module is fixing, because the invented ref
- * is in `lift` rather than `quoted` and so is never printed. A NUL is neither
+ * is in `lift` rather than `inert` and so is never printed. A NUL is neither
  * whitespace nor a word character, so it terminates the match instead of
  * bridging it, and `partitionBodyRefs` asserts the invariant besides.
  */
@@ -185,33 +239,40 @@ function maskQuoted(text) {
 
 /**
  * Split a PR body's closing references into the ones the author meant and the
- * ones they merely quoted.
+ * inert ones — quoted, or negated.
  *
  * Discussing another ticket in a PR body is normal and desirable — "this is not
  * #N", a postmortem quoting a previous commit message, a fenced block showing
- * what a commit carried. Before this masking, every one of those closed the issue it
- * named, on the next promotion to `main`, with no way to see it had happened.
+ * what a commit carried, "this does not close #N". Lifted, every one of those
+ * would close the issue it named, on the next promotion to `main`, with no way
+ * to see it had happened.
  *
- * `quoted` is returned rather than discarded because dropping it silently is
+ * `inert` is returned rather than discarded because dropping it silently is
  * the same silence pointed the other way: a keyword written only inside
  * backticks would vanish with no trace. The caller prints both.
  *
  * @param {string} [prBody]
- * @returns {{ lift: string[], quoted: string[] }} `lift` is what to write into
- *   the commit; `quoted` is what was found only in a quoting context.
+ * @returns {{ lift: string[], inert: string[] }} `lift` is what to write into
+ *   the commit; `inert` is what was found only in a quoting context or after
+ *   a negation.
  */
 export function partitionBodyRefs(prBody) {
-  if (!prBody) return { lift: [], quoted: [] }
+  if (!prBody) return { lift: [], inert: [] }
   const raw = parseClosingRefs(prBody)
   // Masking only ever REMOVES text, so anything the masked scan finds must also
   // be in the raw scan. Enforced rather than assumed: a mask that let a keyword
   // bind across the region it blanked would invent a ref the author never
   // wrote, and inventing one is the only outcome here worse than the bug.
   const rawKeys = new Set(raw.map((r) => r.toLowerCase()))
-  const lift = parseClosingRefs(maskQuoted(prBody)).filter((r) => rawKeys.has(r.toLowerCase()))
+  const masked = maskQuoted(prBody)
+  const lift = dedupe(
+    scanClosing(masked)
+      .filter((m) => !negated(masked, m.index))
+      .map((m) => m.ref),
+  ).filter((r) => rawKeys.has(r.toLowerCase()))
   const lifted = new Set(lift.map((r) => r.toLowerCase()))
-  const quoted = raw.filter((r) => !lifted.has(r.toLowerCase()))
-  return { lift, quoted }
+  const inert = raw.filter((r) => !lifted.has(r.toLowerCase()))
+  return { lift, inert }
 }
 
 /**
@@ -255,7 +316,7 @@ export function parseClosesFlag(value) {
  * @param {string} [args.closes]  raw `--closes` flag value
  * @returns {{ message: string, added: string[], skipped: string[] }} the
  *   message to commit, which refs were appended, and which the body named only
- *   inside a quoting context and will therefore NOT close. The caller logs both
+ *   inside a quoting context or after a negation, and will therefore NOT close. The caller logs both
  *   so neither a lift nor a non-lift is invisible.
  */
 export function withClosingTrailers({ message, prBody, closes }) {
@@ -264,7 +325,7 @@ export function withClosingTrailers({ message, prBody, closes }) {
   // `--closes` is the explicit path the convention tells everyone to use, so it
   // goes first and wins unconditionally — over prose, and over a body that
   // quotes some other ref entirely.
-  const { lift, quoted } = partitionBodyRefs(prBody)
+  const { lift, inert } = partitionBodyRefs(prBody)
   const wanted = [...parseClosesFlag(closes), ...lift]
   const added = []
   for (const ref of wanted) {
@@ -274,10 +335,10 @@ export function withClosingTrailers({ message, prBody, closes }) {
     added.push(ref)
   }
 
-  // A quoted ref that ends up closing anyway — named by `--closes`, or already
+  // An inert ref that ends up closing anyway — named by `--closes`, or already
   // a trailer on the commit — was not skipped in any sense the reader cares
   // about, so do not report it.
-  const skipped = quoted.filter((r) => !already.has(r.toLowerCase()))
+  const skipped = inert.filter((r) => !already.has(r.toLowerCase()))
 
   if (!added.length) return { message, added, skipped }
 
