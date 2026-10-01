@@ -33,6 +33,7 @@
   ],
   "scripts": {
     "test": "node --test 'test/*.test.mjs'",
+    "conformance": "AGIT_CONFORMANCE=1 node --test test/permissions.test.mjs",
     "prepublishOnly": "npm test"
   },
   "engines": {

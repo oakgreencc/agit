@@ -17,9 +17,11 @@
  *            the worktree sync, and the session-start check that the env
  *            above actually reached the session (session-env.mjs). Tracked
  *            in the project, so every contributor's sessions get them.
- *   perms    `agit` allowed without a prompt (speed: the tool is the gate, a
- *            prompt in front of it is noise); `git push` and `gh` denied (the
- *            two paths that act as the human).
+ *   perms    `agit`, the read-only git and the worktree tools the workflow
+ *            uses, allowed without a prompt (the tool is the gate; a prompt,
+ *            or auto mode's classifier, in front of it is noise that can
+ *            stall a headless session — permissions.mjs lists the calls);
+ *            `git push` and `gh` denied (the two paths that act as the human).
  *
  * `mergeSettings` is idempotent: running setup twice changes nothing, and
  * unrelated keys, hooks and permissions are kept.
@@ -111,7 +113,23 @@ export function claudeHooks() {
   }
 }
 
-export const ALLOW = ['Bash(agit *)', 'Bash(git fetch *)']
+export const ALLOW = [
+  'Bash(agit *)',
+  'Bash(git fetch *)',
+  'Bash(git merge --no-commit *)',
+  'Bash(git add *)',
+  // A trailing ` *` needs something after it: the bare forms get their own rule.
+  'Bash(git status)',
+  'Bash(git status *)',
+  'Bash(git diff)',
+  'Bash(git diff *)',
+  'Bash(git log *)',
+  'Bash(git worktree add *)',
+  'Bash(git worktree list)',
+  'Bash(git worktree remove *)',
+  'EnterWorktree',
+  'ExitWorktree',
+]
 export const DENY = ['Bash(git push *)', 'Bash(gh *)']
 
 /**
