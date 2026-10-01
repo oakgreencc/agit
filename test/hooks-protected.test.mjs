@@ -38,7 +38,7 @@ const G = {
   none: { state: 'none' },
   on: { state: 'active', grant: GRANT, session: 'sess-a' },
   expired: { state: 'expired', grant: { ...GRANT, expiresAt: '2020-01-01T00:00:00Z' } },
-  theirs: { state: 'mismatch', grant: GRANT, session: 'sess-b' },
+  theirs: { state: 'mismatch', grants: [GRANT], session: 'sess-b' },
   wrongScope: { state: 'active', grant: { ...GRANT, scopes: ['no-verify'] }, session: 'sess-a' },
 }
 
@@ -65,7 +65,8 @@ const fileCases = [
   ['reads are not writes', { tool: 'Read', filePath: 'ci/run.mjs' }, false],
   ['Bash is bashVerdict’s call', { tool: 'Bash' }, false],
   ['outside any checkout', { tool: 'Write', filePath: '/tmp/scratch.txt' }, false],
-  ['the grant file is human-only', { tool: 'Write', filePath: '/repo/.git/agit/maintainer.json' }, true, G.on],
+  ['the grant file is human-only', { tool: 'Write', filePath: '/repo/.git/agit/maintainer/sess-a.json' }, true, G.on],
+  ['the legacy grant file is human-only', { tool: 'Write', filePath: '/repo/.git/agit/maintainer.json' }, true, G.on],
   ['the grant log is human-only', { tool: 'Edit', filePath: '.git/agit/maintainer.log' }, true, G.on],
 ]
 for (const [label, input, deny, grant = G.none] of fileCases) {
@@ -171,6 +172,15 @@ test('refusals say why and how to get a grant, naming this session', () => {
   assert.match(text, /sess-a/)
 })
 
+test('a mismatch refusal names every grantee', () => {
+  const other = { ...GRANT, session: 'sess-c', scopes: ['merge'], reason: 'merging the release' }
+  const lookup = lookupWith({ state: 'mismatch', grants: [GRANT, other], session: 'sess-b' })
+  const text = String(verdict({ tool: 'Edit', filePath: 'ci/run.mjs', cwd: ROOT, lookup }))
+  assert.match(text, /session sess-a \[protected\] until 2099-01-01T00:00:00Z — "test grant"/)
+  assert.match(text, /session sess-c \[merge\] until 2099-01-01T00:00:00Z — "merging the release"/)
+  assert.match(text, /--session sess-b/)
+})
+
 test('a write resolved against the event cwd', () => {
   assert.notEqual(bashVerdict({ command: 'echo x > run.mjs', cwd: '/repo/ci', lookup: lookupWith(G.none) }), null)
   assert.equal(bashVerdict({ command: 'echo x > run.mjs', cwd: '/repo/src', lookup: lookupWith(G.none) }), null)
@@ -204,9 +214,9 @@ test('makeLookup: a linked worktree anywhere is judged by its own checkout, gran
     assert.notEqual(denied, null)
     assert.equal(verdict({ tool: 'Write', filePath: join(wt, 'src/x.mjs'), cwd: wt, lookup: makeLookup('s1') }), null)
 
-    mkdirSync(join(main, '.git/agit'), { recursive: true })
+    mkdirSync(join(main, '.git/agit/maintainer'), { recursive: true })
     writeFileSync(
-      join(main, '.git/agit/maintainer.json'),
+      join(main, '.git/agit/maintainer/s1.json'),
       JSON.stringify({ ...GRANT, session: 's1' }),
     )
     assert.equal(verdict({ tool: 'Write', filePath: 'ci/x.mjs', cwd: wt, lookup: makeLookup('s1') }), null)

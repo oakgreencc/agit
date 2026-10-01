@@ -16,10 +16,14 @@
  *   2. Build the tree to publish, LOCALLY, with git — a temporary index for an
  *      ordinary publish, the completed merge commit's tree for a merge.
  *   3. Ship the difference: upload the blobs GitHub does not have, then
- *      `POST /git/trees` against the head's tree. GitHub answers with a tree
- *      sha, and because trees are content-addressed it must equal the local
- *      one. If it does not, something (a mode, a filter, a path) differs from
- *      what the agent validated, and the publish stops before any commit.
+ *      `POST /git/trees` against a base tree: the head's tree for an ordinary
+ *      publish, and for a merge the tree of whichever parent is nearer — see
+ *      `nearerParent` (fewer differing paths, the head on a tie). The request
+ *      carries one entry per differing path, and a large diff 502s the trees
+ *      endpoint. GitHub answers with a tree sha, and because trees are
+ *      content-addressed it must equal the local one whichever base was used.
+ *      If it does not, something (a mode, a filter, a path) differs from what
+ *      the agent validated, and the publish stops before any commit.
  *   4. `POST /git/commits` — message, tree, parents, nothing else. GitHub
  *      signs it; it lands Verified as the App.
  *   5. Move the ref, fast-forward only.
@@ -31,10 +35,11 @@
  * built, and every path outside the published set is the branch's own.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PublishError } from '../errors.mjs'
+import { retryServerErrors } from '../github/app.mjs'
 import {
   batchByBytes,
   blobShas,
@@ -141,17 +146,65 @@ export function worktreeTree({ git, base, paths = null, indexFile, beforeWrite }
 }
 
 /**
- * What a `merge` publishes: the worktree's completed local merge, read back
- * from `HEAD`.
+ * The commit a merge in progress is merging in — `MERGE_HEAD`, which `git
+ * merge --no-commit` (or a conflicted merge) leaves behind — or `null` when no
+ * merge is in progress. Asked of git rather than stat'ed, so it is right in a
+ * linked worktree, whose `MERGE_HEAD` is not under `.git/`.
  *
- * The contract is "finish the merge locally as you would anyway" — `git
- * fetch`, `git merge`, resolve, `git commit` — and then publish `HEAD` as the
- * App. Two shapes are recognised:
+ * @param {Function} git
+ * @returns {string | null}
+ */
+export function mergeHead(git) {
+  try {
+    return git(['rev-parse', '-q', '--verify', 'MERGE_HEAD']).trim() || null
+  } catch {
+    return null // exit 1: no merge in progress
+  }
+}
+
+/** @param {Function} git @param {string} a @param {string} b */
+const isAncestorOf = (git, a, b) => {
+  try {
+    git(['merge-base', '--is-ancestor', a, b])
+    return true
+  } catch {
+    return false
+  }
+}
+
+const staleMerge = (firstParent, branchHead) =>
+  new PublishError(
+    `refusing to merge: HEAD's first parent is ${firstParent.slice(0, 7)}, but the branch head on GitHub is ` +
+      `${branchHead.slice(0, 7)}.\n\nThe merge was made on a worktree that is behind the branch. Bring it up ` +
+      'to date and redo the merge:\n\n' +
+      '  git merge --abort   # only if a merge is still in progress\n' +
+      '  agit advance <branch>\n' +
+      '  git merge --no-commit <what you merged>\n',
+  )
+
+/**
+ * What a `merge` publishes: the worktree's local merge — in progress, or
+ * committed.
  *
+ * The contract is "finish the merge locally, short of the commit" — `git
+ * fetch`, `git merge --no-commit`, resolve, `git add` — and then publish it as
+ * the App. No local commit is needed: the commit GitHub creates is the only
+ * one, and making a scratch one first only runs the signing path for an
+ * object nobody reads. Three shapes are recognised:
+ *
+ *   - a merge in progress (`MERGE_HEAD` exists): parents `[HEAD, MERGE_HEAD]`,
+ *     the tree of the real index (`git write-tree` — the resolved index IS the
+ *     merge), and `MERGE_MSG` with its `# Conflicts:` comments stripped. An
+ *     index that still has unmerged paths is refused, naming them — a stronger
+ *     guard than a committed merge gets, where `git add .` over conflict
+ *     markers passes unseen. `beforeWrite` (the pre-commit hook) runs on that
+ *     real index before its tree is written, as `git commit` would run it;
+ *     the result is marked `uncommitted` so the message hooks run too.
  *   - `HEAD` has two parents and the first is the branch head on GitHub: a
- *     real merge. Its tree and message are published as a two-parent commit
- *     with the same parents, in the same order (`[head, merged-in]`, which is
- *     what `update-branch` produces, so history reads the same either way).
+ *     committed merge. Its tree and message are published as a two-parent
+ *     commit with the same parents, in the same order (`[head, merged-in]`,
+ *     which is what `update-branch` produces, so history reads the same
+ *     either way). The local commit is left behind for its Verified twin.
  *   - `HEAD` has one parent: git fast-forwarded. There is nothing to create;
  *     the ref moves to `HEAD` if GitHub already has it.
  *
@@ -159,7 +212,33 @@ export function worktreeTree({ git, base, paths = null, indexFile, beforeWrite }
  * stale worktree, and publishing it would drop whatever landed in between —
  * refused, with the fetch-and-redo instruction.
  */
-export function localMerge({ git, branchHead }) {
+export function localMerge({ git, branchHead, readFile = (p) => readFileSync(p, 'utf8'), beforeWrite }) {
+  const merging = mergeHead(git)
+  if (merging) {
+    const head = git(['rev-parse', 'HEAD']).trim()
+    if (head !== branchHead) throw staleMerge(head, branchHead)
+    const unmerged = nulSplit(git(['diff', '--name-only', '--diff-filter=U', '-z']))
+    if (unmerged.length) {
+      throw new PublishError(
+        `refusing to merge: ${unmerged.length} unmerged path${unmerged.length === 1 ? '' : 's'} in the index:\n\n` +
+          `${unmerged.map((p) => `  ${p}`).join('\n')}\n\n` +
+          'Resolve each one, `git add <file>`, and run the merge verb again. Nothing was published.',
+      )
+    }
+    // The pre-commit hook's moment: the real index holds the resolved merge,
+    // and whatever the hook stages into it is what ships.
+    beforeWrite?.({})
+    const msgPath = git(['rev-parse', '--path-format=absolute', '--git-path', 'MERGE_MSG']).trim()
+    return {
+      kind: 'merge',
+      tree: git(['write-tree']).trim(),
+      parents: [head, merging],
+      // stripspace, not a regex: it honours core.commentChar.
+      message: git(['stripspace', '--strip-comments'], { input: readFile(msgPath) }).replace(/\n+$/, ''),
+      uncommitted: true,
+    }
+  }
+
   const [head, ...parents] = lines(git(['rev-list', '--parents', '-n', '1', 'HEAD']))[0].split(
     /\s+/,
   )
@@ -169,15 +248,7 @@ export function localMerge({ git, branchHead }) {
       `refusing to merge: HEAD has ${parents.length} parents; Publish merges exactly two.`,
     )
   }
-  if (parents[0] !== branchHead) {
-    throw new PublishError(
-      `refusing to merge: HEAD's first parent is ${parents[0].slice(0, 7)}, but the branch head on GitHub is ` +
-        `${branchHead.slice(0, 7)}.\n\nThe merge was made on a worktree that is behind the branch. Bring it up ` +
-        'to date and redo the merge:\n\n' +
-        '  agit advance <branch>\n' +
-        '  git merge <what you merged>\n',
-    )
-  }
+  if (parents[0] !== branchHead) throw staleMerge(parents[0], branchHead)
   return {
     kind: 'merge',
     sha: head,
@@ -275,14 +346,20 @@ export async function publishTree({
     )
   }
 
+  // Blob and tree writes are content-addressed — the answer is a sha fixed by
+  // the body — so a 5xx is safe to repeat. Commit and ref writes are not (a
+  // 5xx does not say whether GitHub made the commit or moved the ref, and a
+  // repeat could make a second commit), so they are never wrapped.
+  const blobsPath = `/repos/${owner}/${repo}/git/blobs`
   const postBlobs = async (blobs) => {
     for (const [i, { path, sha, bytes }] of blobs.entries()) {
       if (i > 0 && pace > 0) await sleep(pace)
       report(`blob ${i + 1}/${blobs.length} ${path}`)
-      const made = await client.json(`/repos/${owner}/${repo}/git/blobs`, 'POST', {
-        content: bytes.toString('base64'),
-        encoding: 'base64',
-      })
+      const made = await retryServerErrors(
+        `POST ${blobsPath}`,
+        () => client.json(blobsPath, 'POST', { content: bytes.toString('base64'), encoding: 'base64' }),
+        { sleep, report },
+      )
       if (made.sha !== sha) {
         throw new PublishError(
           `refusing to publish: ${path} uploaded as ${made.sha.slice(0, 7)} but is ${sha.slice(0, 7)} locally.`,
@@ -290,11 +367,13 @@ export async function publishTree({
       }
     }
   }
+  const treesPath = `/repos/${owner}/${repo}/git/trees`
   const postTree = (baseTree, treeEntries) =>
-    client.json(`/repos/${owner}/${repo}/git/trees`, 'POST', {
-      base_tree: baseTree,
-      tree: treeEntries,
-    })
+    retryServerErrors(
+      `POST ${treesPath}`,
+      () => client.json(treesPath, 'POST', { base_tree: baseTree, tree: treeEntries }),
+      { sleep, report },
+    )
   const inlineEntry = ({ path, mode, bytes }) => ({
     path,
     mode,
@@ -439,14 +518,25 @@ export function advance({ git, target }) {
   const old = git(['rev-parse', 'HEAD']).trim()
   if (old === target) return { advanced: true, from: old, to: target, restored: [], recorded: [] }
 
-  const isAncestor = (a, b) => {
-    try {
-      git(['merge-base', '--is-ancestor', a, b])
-      return true
-    } catch {
-      return false
+  // A merge in progress. `reset --soft` refuses to run in the middle of one,
+  // and once `target` contains `MERGE_HEAD` the merge has landed — the
+  // `merge` verb just published it — so its state is cleared with `merge
+  // --quit`, which leaves index and worktree alone (`reset --merge` would
+  // touch the worktree, which this function never does). A merge the target
+  // does NOT contain is someone's unfinished work: reported, not quit.
+  const merging = mergeHead(git)
+  if (merging && !isAncestorOf(git, merging, target)) {
+    return {
+      advanced: false,
+      from: old,
+      to: target,
+      reason:
+        `a merge in progress (of ${merging.slice(0, 7)}) is not on the branch; not clearing it. ` +
+        'Publish it with the merge verb, or `git merge --abort` it first.',
     }
   }
+
+  const isAncestor = (a, b) => isAncestorOf(git, a, b)
   // A local commit is safe to move past when the branch holds its equivalent:
   // same tree, and its first parent on the branch. That is exactly the local
   // merge commit the `merge` verb has just republished as the App — different
@@ -502,11 +592,12 @@ export function advance({ git, target }) {
     throw new PublishError(
       `refusing to advance: ${conflicts.length} path${conflicts.length === 1 ? '' : 's'} changed on the branch AND ` +
         `in this worktree, with different content:\n\n${conflicts.map((p) => `  ${p}`).join('\n')}\n\n` +
-        'Nothing was moved. Merge the branch into the worktree, resolve, commit, then publish the merge:\n\n' +
-        `  git merge ${target}\n  agit merge <branch>\n`,
+        'Nothing was moved. Merge the branch into the worktree, resolve and `git add`, then publish the merge:\n\n' +
+        `  git merge --no-commit ${target}\n  agit merge <branch>\n`,
     )
   }
 
+  if (merging) git(['merge', '--quit'])
   git(['reset', '--soft', target])
   if (untouched.length)
     git(['restore', `--source=${target}`, '--staged', '--worktree', '--', ...untouched])
@@ -538,7 +629,9 @@ function changedBetween(git, from, tree) {
  * The caller has fetched the branch so `head.sha` exists locally. `gate`, when
  * given, judges the CANDIDATE — the tree as built, pre-commit hook included —
  * and throws to refuse; it runs before the message hooks and before anything
- * reaches GitHub. Returns the created commit and the paths it changed.
+ * reaches GitHub. Returns the created commit and the paths it changed — or,
+ * when the branch already holds this content, its head with `noop: true` and
+ * nothing written.
  *
  * @typedef {{ sha: string, tree: string, branch?: string }} Head
  * @typedef {{
@@ -592,6 +685,23 @@ export async function publishWorktree({
     indexFile,
     beforeWrite: hooks?.preCommit,
   })
+  // The branch already has exactly this content — nothing in scope is dirty,
+  // or the dirty paths already equal the head's. That is the retry after a
+  // lost response: the first run's commit landed and its reply did not, so
+  // the worktree was never advanced. A fact, not a failure: answer with the
+  // head, write nothing, and let the caller open the PR and advance. With no
+  // branch yet there is no head to answer with, and an empty publish stays a
+  // refusal.
+  if (head && (!tree || tree === head.tree)) {
+    return {
+      commit: { sha: head.sha, url: null, verified: null },
+      changed: [],
+      shipped: null,
+      created: false,
+      noop: true,
+      message,
+    }
+  }
   if (!tree) throw new PublishError('no changes in worktree')
   if (tree === target.tree)
     throw new PublishError('nothing to publish: the tree is identical to the branch head.')
@@ -627,21 +737,50 @@ export async function publishWorktree({
     parents: [target.sha],
   })
   await moveRef({ client, owner, repo, branch, sha: commit.sha, create: !head })
-  return { commit, changed: shipped.entries.map((e) => e.path), shipped, created: !head, message: finalMessage }
+  return {
+    commit,
+    changed: shipped.entries.map((e) => e.path),
+    shipped,
+    created: !head,
+    noop: false,
+    message: finalMessage,
+  }
 }
 
 /**
- * Publish the worktree's completed local merge onto `branch` as a two-parent
- * commit created by GitHub — Verified as the App, with the agent's resolved
- * tree.
+ * The parent to build a merge's tree on: whichever the resolved tree differs
+ * from by fewer paths, the head winning a tie. The tree request carries one
+ * entry per differing path, and building a stale branch's merge on its head
+ * sends every path the merge brought in — enough, on a long-stale branch, for
+ * GitHub to answer 502 every time. Only the base of the tree request changes;
+ * the commit's parents, and the tree it must equal, do not.
  *
- * The same moments as a publish, where they apply: `gate` judges the
- * candidate (its `paths` are the resolution — content that is neither
- * parent's; what came whole from a side was reviewed where it came from);
- * `hooks.commitMessage` runs on a `message` override (the local commit already
- * ran it on its own); `hooks.prePush` runs before anything is sent.
+ * @param {{ git: Function, head: Head, mergedIn: Head, tree: string, report?: (line: string) => void }} input
+ * @returns {Head}
+ */
+function nearerParent({ git, head, mergedIn, tree, report = noop }) {
+  const fromHead = changedBetween(git, head.sha, tree).length
+  const fromMergedIn = changedBetween(git, mergedIn.sha, tree).length
+  if (fromMergedIn >= fromHead) return head
+  const paths = (k) => `${k} path${k === 1 ? '' : 's'}`
+  report(`building the merge tree on the merged-in parent (${paths(fromMergedIn)}, vs ${fromHead} from the head)`)
+  return mergedIn
+}
+
+/**
+ * Publish the worktree's local merge — in progress (`git merge --no-commit`)
+ * or committed — onto `branch` as a two-parent commit created by GitHub —
+ * Verified as the App, with the agent's resolved tree. See `localMerge`.
  *
- * @param {{ git: Function, client: any, owner: string, repo: string, branch: string, head: Head, message?: string | null, report?: (line: string) => void, sleep?: (ms: number) => Promise<void>, pace?: number, hooks?: PublishHooks, gate?: (candidate: Candidate) => void | Promise<void> }} input
+ * The same moments as a publish, where they apply: `hooks.preCommit` runs on
+ * the real index of a merge in progress, before its tree is written; `gate`
+ * judges the candidate (its `paths` are the resolution — content that is
+ * neither parent's; what came whole from a side was reviewed where it came
+ * from); `hooks.commitMessage` runs on a `message` override, and on the
+ * message of a merge in progress (a committed merge already ran it on its
+ * own); `hooks.prePush` runs before anything is sent.
+ *
+ * @param {{ git: Function, client: any, owner: string, repo: string, branch: string, head: Head, message?: string | null, report?: (line: string) => void, sleep?: (ms: number) => Promise<void>, pace?: number, hooks?: PublishHooks, gate?: (candidate: Candidate) => void | Promise<void>, readFile?: (path: string) => string }} input
  * @returns {Promise<{ kind: 'fast-forward', commit: { sha: string, verified: null } } | { kind: 'merge', commit: any, shipped: any, parents: string[] }>}
  */
 export async function publishMerge({
@@ -657,8 +796,9 @@ export async function publishMerge({
   pace,
   hooks,
   gate,
+  readFile,
 }) {
-  const local = localMerge({ git, branchHead: head.sha })
+  const local = localMerge({ git, branchHead: head.sha, readFile, beforeWrite: hooks?.preCommit })
 
   if (local.kind === 'fast-forward') {
     if (local.sha === head.sha)
@@ -682,13 +822,21 @@ export async function publishMerge({
       .filter((p) => fromTheirs.has(p))
     await gate({ kind: 'merge', base: head, tree: local.tree, parents: local.parents, paths: resolved })
   }
-  const finalMessage = message ? (hooks?.commitMessage ? hooks.commitMessage(message) : message) : local.message
-  // The local merge commit IS the twin when its message stands.
+  // A committed merge already ran the message hooks on its own message; an
+  // override, or the MERGE_MSG of a merge in progress, has not.
+  const unhooked = message || (local.uncommitted ? local.message : null)
+  const finalMessage = unhooked
+    ? hooks?.commitMessage
+      ? hooks.commitMessage(unhooked)
+      : unhooked
+    : local.message
+  // The local merge commit IS the twin when its message stands; a merge in
+  // progress has no local commit, so pre-push is shown a twin.
   await hooks?.prePush?.({
     tree: local.tree,
     parents: local.parents,
     message: finalMessage,
-    ...(message ? {} : { sha: local.sha }),
+    ...(unhooked || !local.sha ? {} : { sha: local.sha }),
   })
 
   const mergedIn = await commitOnGitHub({ client, owner, repo, sha: local.parents[1] })
@@ -698,18 +846,18 @@ export async function publishMerge({
         'Merge a fetched ref (origin/<branch>), not a local-only commit.',
     )
   }
-  // A merge whose resolved tree equals the head's is legal — the other side
-  // brought nothing the head did not already have — and that tree already
+  // A merge whose resolved tree equals either parent's is legal — one side
+  // brought nothing the other did not already have — and that tree already
   // exists on GitHub, so there is nothing to ship.
   const shipped =
-    local.tree === head.tree
+    local.tree === head.tree || local.tree === mergedIn.tree
       ? { tree: local.tree, entries: [], uploaded: [], inline: [], posted: [] }
       : await publishTree({
           git,
           client,
           owner,
           repo,
-          base: head,
+          base: nearerParent({ git, head, mergedIn, tree: local.tree, report }),
           tree: local.tree,
           known: new Set([
             ...blobShas(git(['ls-tree', '-r', '-z', head.sha])),

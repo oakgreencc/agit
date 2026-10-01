@@ -24,20 +24,24 @@
 import { PublishError } from '../src/errors.mjs'
 import { VERSION } from '../src/gates/version.mjs'
 import { explain } from '../src/cli/explain.mjs'
+import { VERBS } from '../src/cli/verbs.mjs'
 
 const HELP = `agit ${VERSION} — work a GitHub project as a GitHub App
 
 Write path (every write is a Verified commit created by GitHub):
   agit publish <branch> <message> (--paths a,b | --all) [--pr <title>] [...]
-  agit merge <branch>                 publish a completed local merge
+  agit merge <branch>                 publish a local merge (git merge --no-commit → resolve → git add)
   agit advance <branch>               move HEAD onto the branch head, keeping work
   agit pr merge <n> [--auto]          merge a PR, if policy allows
   agit pr update <n>                  bring a PR up to date with its base
+  agit issue <action> ...             create, comment, close, edit, assign, label (--body-file)
 
 Read path:
   agit api <METHOD> <path> [--body <json>|--body-file <f>] [--paginate] [--raw] [--out <f>]
   agit graphql '<query>' [--vars <json>|--vars-file <f>]
   agit jobs <run-id | run URL> [--logs <dir>] [--all]
+  agit ci wait <sha|ref> [--check c]  one check's verdict: exit 0 green, 1 red, 2 unknowable
+  agit issue read <n>                 an issue as JSON (with the etag \`issue edit\` needs)
   agit status [<branch>]              what this worktree holds that GitHub does not (run before removing it)
   agit credential get                 git credential helper (git runs this)
 
@@ -54,24 +58,6 @@ Setup:
 Common flags: -C <dir> (run as if in <dir>), --repo <owner/repo>.
 Run \`agit <verb> --help\` for a verb's flags. Docs: skills/agit/SKILL.md.`
 
-/** verb → module exporting `run(argv)`. Imported lazily: the credential helper must start fast. */
-const VERBS = {
-  publish: () => import('../src/cli/publish.mjs').then((m) => m.runPublish),
-  merge: () => import('../src/cli/publish.mjs').then((m) => m.runMerge),
-  advance: () => import('../src/cli/publish.mjs').then((m) => m.runAdvance),
-  api: () => import('../src/cli/api.mjs').then((m) => m.runApi),
-  graphql: () => import('../src/cli/api.mjs').then((m) => m.runGraphql),
-  jobs: () => import('../src/cli/api.mjs').then((m) => m.runJobs),
-  status: () => import('../src/cli/status.mjs').then((m) => m.run),
-  credential: () => import('../src/cli/credential.mjs').then((m) => m.run),
-  validate: () => import('../src/cli/validate.mjs').then((m) => m.run),
-  protected: () => import('../src/cli/protected.mjs').then((m) => m.run),
-  maintainer: () => import('../src/cli/maintainer.mjs').then((m) => m.run),
-  pr: () => import('../src/cli/pr.mjs').then((m) => m.run),
-  hook: () => import('../src/hooks/index.mjs').then((m) => m.run),
-  setup: () => import('../src/setup/index.mjs').then((m) => m.run),
-  doctor: () => import('../src/setup/doctor.mjs').then((m) => m.run),
-}
 
 const [verb, ...argv] = process.argv.slice(2)
 

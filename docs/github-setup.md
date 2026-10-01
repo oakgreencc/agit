@@ -65,7 +65,14 @@ What it contains, and why:
   Without it, CODEOWNERS is documentation. agit reads CODEOWNERS as its
   manifest of protected paths and refuses to edit or publish them without your
   grant. This rule is what stops a PR that touches them from merging without
-  you, whatever happened locally.
+  you, whatever happened locally. Once you approve such a PR, `agit pr merge`
+  (and `--auto`) lets the agent land it, so you act once: approve. It checks
+  GitHub's own records — the base's CODEOWNERS, an individual `@login` owner's
+  approval for every protected path, no owner requesting changes — and follows
+  this ruleset on stale approvals: with `dismiss_stale_reviews_on_push: false`
+  (agit's default) an approval on an earlier commit still counts; otherwise it
+  must be on the current head. Team-owned paths and `protected.extra` still
+  need you to merge.
 - **Require status checks to pass** — once there is CI:
   `agit setup project --required-check <job>`. If agents merge their own PRs,
   CI is the acceptance gate, and `requiredCheck` in `.agit.json` lets
