@@ -59,12 +59,36 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agit hook session-check",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   },
   "permissions": {
     "allow": [
       "Bash(agit *)",
-      "Bash(git fetch *)"
+      "Bash(git fetch *)",
+      "Bash(git merge --no-commit *)",
+      "Bash(git add *)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git worktree add *)",
+      "Bash(git worktree list)",
+      "Bash(git worktree remove *)",
+      "EnterWorktree",
+      "ExitWorktree"
     ],
     "deny": [
       "Bash(git push *)",

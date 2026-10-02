@@ -29,6 +29,7 @@ import { describe, describeAll } from '../maintainer.mjs'
 import { SELF_PROTECTED } from '../protected.mjs'
 import { readRawGit, sessionFindings } from '../session-env.mjs'
 import { WITHHELD_PERMISSIONS } from './manifest.mjs'
+import { describeCall, readSettingsLayers, unallowedCalls } from './permissions.mjs'
 import { missingFromSettings } from './settings.mjs'
 
 /** @typedef {{ level: 'ok' | 'warn' | 'fail', label: string, detail?: string }} Finding */
@@ -155,6 +156,26 @@ export function processFindings({ claude, ...input }) {
       "raw git here is the human's own; agent sessions are checked at start by `agit hook session-check`",
     ),
   ]
+}
+
+/**
+ * Do the settings layers explicitly allow every call the workflow makes
+ * (permissions.mjs)? One not allowed is left to auto mode's classifier, or a
+ * prompt no headless session can answer.
+ *
+ * @param {{ path: string, settings: any }[]} layers
+ * @returns {Finding[]}
+ */
+export function permissionRuleFindings(layers) {
+  const gaps = unallowedCalls(layers.map((l) => l.settings))
+  const where = layers.map((l) => l.path).join(', ') || 'no settings files'
+  if (!gaps.length) return [ok(`permission rules allow every call the agit workflow makes (${where})`)]
+  return gaps.map(({ call, verdict, rule }) =>
+    warn(
+      `${describeCall(call)} is ${verdict === 'none' ? 'not explicitly allowed' : `${verdict === 'deny' ? 'denied' : 'set to ask'} by ${rule}`}`,
+      `${call.why}; auto mode's classifier, or a prompt, decides it instead. Run: agit setup project`,
+    ),
+  )
 }
 
 /** @param {Finding[]} findings */
@@ -297,6 +318,13 @@ export async function run(argv, deps = {}) {
     } catch (err) {
       add(fail('.claude/settings.json', /** @type {Error} */ (err).message))
     }
+  }
+
+  // --- permissions ------------------------------------------------------------
+  try {
+    add(...permissionRuleFindings(readSettingsLayers({ root: ctx.root, home: ctx.env.HOME || undefined })))
+  } catch (err) {
+    add(warn('could not read the Claude Code settings layers', /** @type {Error} */ (err).message))
   }
 
   // --- this process ---------------------------------------------------------
