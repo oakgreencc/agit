@@ -39,6 +39,7 @@ import { contextOptions } from '../cli/common.mjs'
 import { flag, has, resolveContext } from '../context.mjs'
 import { appDir, asApp, request } from '../github/app.mjs'
 import { appManifest, installUrl, newAppUrl } from './manifest.mjs'
+import { createdPage, foreignCallbackPage, manifestPage, notFoundPage } from './pages.mjs'
 import { createPrompter } from './prompt.mjs'
 
 const say = (line = '') => console.log(line)
@@ -54,18 +55,12 @@ export function openBrowser(url) {
   }
 }
 
-const escapeHtml = (s) =>
-  String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c)
+export { manifestPage }
 
-/** The page that carries the manifest to GitHub. */
-export function manifestPage({ action, manifest }) {
-  return `<!doctype html><meta charset="utf-8"><title>agit: create GitHub App</title>
-<body style="font-family:system-ui;max-width:40em;margin:4em auto">
-<p>Sending the App manifest to GitHub… review it there and click <b>Create GitHub App</b>.</p>
-<form id="f" method="post" action="${escapeHtml(action)}">
-<input type="hidden" name="manifest" value="${escapeHtml(JSON.stringify(manifest))}">
-<button type="submit">Continue to GitHub</button></form>
-<script>document.getElementById('f').submit()</script>`
+/** Local pages are never cached: each belongs to one run. */
+const sendHtml = (res, status, html, done) => {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+  res.end(html, done)
 }
 
 /**
@@ -73,35 +68,37 @@ export function manifestPage({ action, manifest }) {
  * callback, return the code. `onReady(url)` is called with the local URL once
  * the server listens (the caller opens it).
  *
- * @param {{ manifestFor: (redirectUrl: string) => object, actionFor: (state: string) => string, onReady: (url: string) => void, timeoutMs?: number }} input
+ * `owner`/`ownerType` only label the page.
+ *
+ * @param {{ manifestFor: (redirectUrl: string) => any, actionFor: (state: string) => string, onReady: (url: string) => void, timeoutMs?: number, owner?: string, ownerType?: 'user' | 'org' }} input
  * @returns {Promise<string>}
  */
-export function awaitManifestCode({ manifestFor, actionFor, onReady, timeoutMs = 15 * 60 * 1000 }) {
+export function awaitManifestCode({ manifestFor, actionFor, onReady, timeoutMs = 15 * 60 * 1000, owner, ownerType }) {
   const state = randomBytes(16).toString('hex')
   return new Promise((resolve, reject) => {
     let base = ''
+    let name = ''
     const server = createServer((req, res) => {
       const url = new URL(req.url ?? '/', base)
       if (url.pathname === '/') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end(manifestPage({ action: actionFor(state), manifest: manifestFor(`${base}/callback`) }))
+        const manifest = manifestFor(`${base}/callback`)
+        name = manifest?.name ?? name
+        const minutes = Math.round(timeoutMs / 60000)
+        sendHtml(res, 200, manifestPage({ action: actionFor(state), manifest, owner, ownerType, minutes }))
         return
       }
       if (url.pathname === '/callback') {
         const code = url.searchParams.get('code')
         // The state ties the callback to THIS run; anything else on the port is not GitHub.
         if (url.searchParams.get('state') !== state || !code) {
-          res.writeHead(400, { 'Content-Type': 'text/plain' })
-          res.end('agit: this callback does not belong to the running setup.')
+          sendHtml(res, 400, foreignCallbackPage())
           return
         }
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end('<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;margin:4em">App created. Return to your terminal.')
-        finish(null, code)
+        // Close only once the page is flushed, or closeAllConnections cuts it off.
+        sendHtml(res, 200, createdPage({ name }), () => finish(null, code))
         return
       }
-      res.writeHead(404)
-      res.end()
+      sendHtml(res, 404, notFoundPage())
     })
     const timer = setTimeout(() => finish(new Error('timed out waiting for GitHub to redirect back')), timeoutMs)
     const finish = (err, code) => {
@@ -302,6 +299,8 @@ async function manifestApp(argv, { fetch, open, prompt, env, timeoutMs, repoOwne
   const code = await awaitManifestCode({
     manifestFor: (redirectUrl) => appManifest({ name, owner, ownerType, redirectUrl, projects }),
     actionFor: (state) => newAppUrl({ owner, ownerType, state }),
+    owner,
+    ownerType,
     onReady: (url) => {
       say(`\nOpen this in a browser signed in to GitHub as an owner of ${owner}:\n  ${url}`)
       open(url)
