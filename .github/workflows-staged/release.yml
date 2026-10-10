@@ -1,0 +1,59 @@
+# Cut a release on every push to main that carries a releasable commit.
+#
+# semantic-release reads the conventional commits since the last `v*` tag
+# (feat → minor, fix/perf → patch, BREAKING CHANGE → major), then:
+#   - publishes @oakgreencc/agit to npm over OIDC trusted publishing — no
+#     npm token is stored anywhere, and provenance is attached;
+#   - pushes the `vX.Y.Z` tag and creates the GitHub release with notes.
+# It never commits back to main: the version lives in the tag and in the
+# published package.json, which main's ruleset (PRs + signed commits) would
+# refuse anyway. See docs/releasing.md.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One release at a time, never cancelled half-way through a publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: npm test
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write # push the tag, create the release
+      issues: write # open an issue if the release fails
+      id-token: write # npm trusted publishing (OIDC) and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # every tag and commit since the last release
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Bundles npm >= 11.5.1, which trusted publishing needs. No
+          # registry-url: the .npmrc it writes would put a token ahead of OIDC.
+          node-version: 24
+      - name: semantic-release
+        run: npx --yes semantic-release@25.0.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
