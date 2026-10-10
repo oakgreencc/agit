@@ -61,6 +61,8 @@ Full walkthrough: [skills/agit/references/setup.md](skills/agit/references/setup
 
 Design notes: [docs/design.md](docs/design.md). The one invariant everything rests on: [docs/verified-commits.md](docs/verified-commits.md).
 
+Releases are cut automatically from `main`: [docs/releasing.md](docs/releasing.md).
+
 ## Configuration
 
 `.agit.json` at the repo root (tracked, and itself protected). Every field optional:
